@@ -1,0 +1,31 @@
+defaults:
+  - env: entity
+  - env_size: s
+  - learning:
+    - ppo-base
+    - ppo-rnn
+  - misc: misc
+  - eval: s
+  - train_levels: random
+  - model:
+    - model-base
+    - model-transformer
+    - model-perm-invariant-mlp
+  - _self_
+
+eval:
+  eval_freq: 64
+
+misc:
+  video_frequency: 2
+
+# Save a local full_model checkpoint every N environment steps.
+# Set <= 0 to disable periodic checkpointing.
+# checkpoint_interval_steps: 10000000
+checkpoint_interval_steps: 1000000 # one-tenth
+
+# Optional custom run name used for both wandb display and checkpoint folder prefix.
+# If null/empty, the auto-generated name from config.py is used.
+runname: backbone_config_save_test
+
+seed: 0

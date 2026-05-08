@@ -1,6 +1,7 @@
 logs/
 outputs/
 wandb/
+checkpoints/
 uv.lock
 
 # Python-generated files
