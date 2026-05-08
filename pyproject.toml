@@ -8,6 +8,8 @@ dependencies = [
     "ipykernel>=7.2.0",
     "ipywidgets>=8.1.8",
     "jax[cuda12]>=0.6.2",
-    "kinetix-env>=2.0.4",
-    "torch>=2.10.0",
+    "kinetix-env",
 ]
+
+[tool.uv.sources]
+kinetix-env = { path = "third_party/kinetix", editable = true }
