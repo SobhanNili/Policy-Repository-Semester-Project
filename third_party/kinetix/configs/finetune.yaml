@@ -1,0 +1,40 @@
+defaults:
+  - env: entity
+  - env_size: l
+  - learning:
+    - ppo-base
+    - ppo-rnn
+  - misc: misc
+  - eval: mujoco
+  - train_levels: mujoco
+  - model:
+    - model-base
+    - model-transformer
+    - model-perm-invariant-mlp
+  - _self_
+
+# Finetune-specific settings.
+checkpoint_path: # relative local path to pbz2 file
+reuse_mode: backbone_only # backbone_only | full_model | random_init
+freeze_backbone: true
+runname: FINETUNE-BACKBONE-REUSE-MUJOCO
+
+# Number of PPO updates to run for each level.
+num_updates_per_level: 256
+
+# Training envs per level; total envs = num_levels * num_train_envs_per_level.
+num_train_envs_per_level: 64
+
+# Update-based checkpointing and logging frequencies.
+checkpoint_interval_updates: 100
+cheap_log_every_updates: 1
+expensive_log_every_updates: 32
+
+# Keep a smaller eval cadence for expensive render rollouts.
+eval:
+  eval_freq: 64
+
+misc:
+  video_frequency: 2
+
+seed: 0
