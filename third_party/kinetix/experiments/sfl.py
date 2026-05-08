@@ -5,6 +5,7 @@ Based on PureJaxRL Implementation of PPO
 import os
 import pickle
 import time
+from io import BytesIO
 from functools import partial
 from typing import NamedTuple
 
@@ -88,7 +89,43 @@ def main(config):
     config["num_updates"] = config["num_updates"] // config["num_gpus"]
     config["num_to_save"] = config["num_to_save"] // config["num_gpus"]
     config["num_train_envs"] = config["num_train_envs"] // config["num_gpus"]
+    train_envs_before_alignment = config["num_train_envs"]
+    config["num_train_envs"] = (
+        config["num_train_envs"] // config["num_minibatches"]
+    ) * config["num_minibatches"]
+    if config["num_train_envs"] != train_envs_before_alignment:
+        print(
+            f"ALIGNING num_train_envs per GPU from {train_envs_before_alignment} to {config['num_train_envs']} "
+            f"to be divisible by num_minibatches={config['num_minibatches']}"
+        )
+    if config["num_train_envs"] == 0:
+        raise ValueError(
+            f"num_train_envs became 0 after alignment. Increase num_train_envs or lower num_minibatches "
+            f"(num_train_envs={train_envs_before_alignment}, num_minibatches={config['num_minibatches']}, num_gpus={config['num_gpus']})."
+        )
+    batches_before_scaling = config["num_batches"]
     config["num_batches"] = config["num_batches"] // config["num_gpus"]
+    if config["num_batches"] == 0:
+        config["num_batches"] = 1
+        print(
+            f"ALIGNING num_batches per GPU from 0 to 1 (global num_batches={batches_before_scaling}, "
+            f"num_gpus={config['num_gpus']})"
+        )
+
+    # Keep update scheduling valid for eval chunks after per-GPU scaling.
+    # This preserves existing behavior (fixed-size eval chunks) while avoiding hard failures.
+    updates_before_alignment = config["num_updates"]
+    config["num_updates"] = (config["num_updates"] // config["eval_freq"]) * config["eval_freq"]
+    if config["num_updates"] != updates_before_alignment:
+        print(
+            f"ALIGNING num_updates per GPU from {updates_before_alignment} to {config['num_updates']} "
+            f"to match eval_freq={config['eval_freq']}"
+        )
+    if config["num_updates"] == 0:
+        raise ValueError(
+            f"num_updates became 0 after alignment. Increase num_updates or lower eval_freq "
+            f"(num_updates={updates_before_alignment}, eval_freq={config['eval_freq']}, num_gpus={config['num_gpus']})."
+        )
 
     print(
         f"CONFIG AFTER: UPDATES = {config['num_updates']}, BATCHES = {config['num_batches']}, TRAIN_ENVS = {config['num_train_envs']}, NUM_TO_SAVE = {config['num_to_save']}"
@@ -691,7 +728,12 @@ def main(config):
 
         plt.tight_layout()
         fig.canvas.draw()
-        im = Image.frombytes("RGB", fig.canvas.get_width_height(), fig.canvas.tostring_rgb())
+        buffer = BytesIO()
+        fig.savefig(buffer, format="png")
+        buffer.seek(0)
+        im = Image.open(buffer).convert("RGB").copy()
+        buffer.close()
+        plt.close(fig)
         return {"maps": wandb.Image(im)}
 
     def get_single_learnability_dict(x, name):
@@ -1017,7 +1059,6 @@ def main(config):
         wandb.log(stats)
 
     checkpoint_steps = config["checkpoint_save_freq"]
-    assert config["num_updates"] % config["eval_freq"] == 0, "num_updates must be divisible by eval_freq"
 
     instances = sample_random_levels(rng, config["num_to_save"] * config["num_gpus"])
     carry = [
