@@ -1,0 +1,27 @@
+defaults:
+  - env: entity
+  - env_size: s
+  - model:
+    - model-base
+    - model-transformer
+    - model-perm-invariant-mlp # for compatibility
+  - train_levels: s # or random
+  - learning:
+    - ppo-base
+    - ppo-rnn
+  - _self_
+
+seed: 0
+learning:
+  num_train_envs: 100 # number of distinct envs
+  num_minibatches: 2 # division of vectorized envs to smaller batches. Number of envs should be divisable by this
+  update_epochs: 8 # the number of times to iterate over the same trajectory. Default: 8
+  num_steps: 64 # PPO roleout length (how many steps in the trajectory)
+
+num_env_copies: 6 # batch size for same env type. A policy network sees this many vecotrizes anvs at once.
+num_updates: 200 # how many ppo updates to do on each env duing one repo iteration
+num_repo_updates: 20 # how many skill repo updates
+
+n_skills: 5 # fixed number of skills for now
+
+# NOTE: each env automatically resets after 256 steps

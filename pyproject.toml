@@ -1,7 +1,7 @@
 [project]
-name = "sp2026-openendedlearning"
+name = "apa"
 version = "0.1.0"
-description = "Semester Project @ A.Mathis Lab, EPFL"
+description = "Adaptive policy reuse in jax. Semester Project @ A.Mathis Lab, EPFL"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
@@ -9,6 +9,7 @@ dependencies = [
     "ipywidgets>=8.1.8",
     "jax[cuda12]>=0.6.2",
     "kinetix-env",
+    "loguru>=0.7.3",
 ]
 
 [tool.uv.sources]
