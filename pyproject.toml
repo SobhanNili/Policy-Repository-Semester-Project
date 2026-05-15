@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "apa"
 version = "0.1.0"
@@ -14,3 +18,7 @@ dependencies = [
 
 [tool.uv.sources]
 kinetix-env = { path = "third_party/kinetix", editable = true }
+
+[tool.setuptools.packages.find]
+include = ["apa*"]
+exclude = ["checkpoints*", "logs*", "wandb*", "third_party*"]

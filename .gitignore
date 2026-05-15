@@ -3,6 +3,7 @@ outputs/
 wandb/
 checkpoints/
 uv.lock
+**/bk.py
 
 # Python-generated files
 __pycache__/
