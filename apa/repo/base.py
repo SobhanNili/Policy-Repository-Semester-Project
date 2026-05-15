@@ -140,8 +140,8 @@ class PolicyRepo(ABC):
                 
                 # Step environments in parallel
                 rng, _rng = jax.random.split(rng)
-                next_obs, next_env_state, _, done, _ = jax.vmap(self.env.step, in_axes=(0, 0, 0, None))(
-                    jax.random.split(_rng, self.num_policies), env_state, action, self.env_params
+                next_obs, next_env_state, _, done, _ = jax.vmap(self.env.step, in_axes=(0, 0, 0, None, 0))(
+                    jax.random.split(_rng, self.num_policies), env_state, action, self.env_params, reset_states
                 )
                 
                 # Render current state
