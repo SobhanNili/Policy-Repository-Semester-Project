@@ -52,7 +52,6 @@ class PolicyRepo(ABC):
 
             self.policy_repo = self.init_policies()
             self.repo_step_counter:int = 0
-            self.initial_pixel_obs = jax.vmap(lambda s: self.pixel_renderer(s.env_state))(self.unique_env_reset_states).image # (num_distinct_envs, 125, 125, 3)
             self.ppo_step = make_ppo_step(config, env, env_params)
 
         def init_policies(self):
@@ -205,7 +204,7 @@ class PolicyRepo(ABC):
         def advance(self):
             policy2env_pairing = self.match()
             policy_state, per_env_perf_history = self.train(policy2env_pairing)
-            self.update(policy_state,per_env_perf_history)
+            self.update(policy_state,per_env_perf_history, policy2env_pairing)
 
             if self.config['use_wandb']:
                 self.log_step2wandb(per_env_perf_history)
@@ -221,6 +220,6 @@ class PolicyRepo(ABC):
             pass
 
         @abstractmethod
-        def update(self,policy_state: PolicyState, per_env_perf_history: dict) -> None:
+        def update(self,policy_state: PolicyState, per_env_perf_history: dict, policy2env_pairing: jax.Array) -> None:
             pass
   

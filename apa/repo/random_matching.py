@@ -14,5 +14,5 @@ class RandomMatchingRepo(PolicyRepo):
 
         return policy2env_pairing
     
-    def update(self, policy_state: PolicyState, per_env_perf_history: dict) -> None:
+    def update(self, policy_state: PolicyState, per_env_perf_history: dict, policy2env_pairing: jax.Array) -> None:
         self.policy_repo = policy_state # for now not paying attention to results
