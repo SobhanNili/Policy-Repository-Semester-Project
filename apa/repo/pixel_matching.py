@@ -115,9 +115,21 @@ class PixelMatchingRepo(PolicyRepo):
                 axis=1
             )
 
-# to show that training is being done properly, do a training with random actions? (override)
-# to show that training is happening, have the policy to env pairing deterministic on solvable tasks -> it should go up
-
-# IN THE MATCH STEP, compare the initial observation of the env with the envs solved in max last number of steps (hyperparam) -> one similarity score per env per policy. Each POLICY LOOKS WHICH ENV IS BEST FOR IT AND SELECTS IT.
-# 
-
+    def evaluate(self) -> jax.Array:
+        self.rng, sub_rng = jr.split(self.rng)
+        
+        if self.policy_perf_hist.is_empty():
+            raise ValueError("The repo hasn't been run before evaluation attempt.")
+        else:
+            # Score all policies against all distinct environments
+            all_envs = jnp.arange(self.num_distinct_envs)
+            policy2env_scores = self.score_policy2env_pairing(all_envs) # Shape: (P, num_distinct_envs)
+            
+            # For tie-breaking when policies have similar scores (e.g. 0.0)
+            self.rng, sub_rng = jr.split(self.rng)
+            noise = jr.uniform(sub_rng, policy2env_scores.shape, minval=0.0, maxval=1e-5)
+            
+            # Each environment picks the policy with the highest score
+            env2policy_pairing = jnp.argmax(policy2env_scores + noise, axis=0) # Shape: (num_distinct_envs,)
+            
+        return self.evaluate_pairing(env2policy_pairing)

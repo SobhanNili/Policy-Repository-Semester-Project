@@ -4,6 +4,11 @@
 - Activate the venv by `source .venv/bin/activate`
 - To speed up jax compilation, set the `JAX_COMPILATION_CACHE_DIR` env var.
 
+The following need to be installed based on the available cuda version:
+- Jax: `uv pip install -U "jax[cuda12]"`
+
+- Torch: `uv pip install torch torchvision --index-url https://download.pytorch.org/whl/cu126`
+
 
 > To train the transformer policy network on randomly generated environments with periodic checkpointing, use `thirdparty/kinetix/experiments/bacbone.py` script. Corresponding config is at `../configs/backbone.yaml`
 

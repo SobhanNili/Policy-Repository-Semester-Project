@@ -201,6 +201,60 @@ class PolicyRepo(ABC):
             data2log.update({'repo_step': self.repo_step_counter})
             wandb.log(data2log)
 
+        def evaluate_pairing(self, env2policy_pairing: jax.Array) -> jax.Array:
+            """Evaluates a specific pairing of policies to environments.
+            env2policy_pairing: jax.Array of shape (num_distinct_envs,) containing policy indices.
+            Returns: jax.Array of shape (num_distinct_envs, 2) containing [solve_rate, avg_return].
+            """
+            params = jax.tree.map(lambda x: x[env2policy_pairing], self.policy_repo.train_state.params)
+            hstate = jax.tree.map(lambda x: x[env2policy_pairing, 0], self.policy_repo.hstate)
+            
+            env_state = self.unique_env_reset_states
+            obs = jax.vmap(self.env.get_obs)(env_state.env_state)
+            
+            def eval_step(carry, _):
+                env_state, obs, hstate, rng = carry
+                rng, _rng = jax.random.split(rng)
+                
+                def single_policy_apply(p, h, o):
+                    ac_in = (
+                        jax.tree.map(lambda x: x[None, None, ...], o), 
+                        jnp.zeros((1, 1), dtype=bool)
+                    )
+                    new_h, pi, _ = self.network.apply(p, h, ac_in)
+                    return new_h, pi
+
+                hstate, pi = jax.vmap(single_policy_apply)(params, hstate, obs)
+                action = pi.sample(seed=_rng).squeeze((1, 2))
+                
+                rng, _rng = jax.random.split(rng)
+                next_obs, next_env_state, _, done, info = jax.vmap(self.env.step, in_axes=(0, 0, 0, None, 0))(
+                    jax.random.split(_rng, self.num_distinct_envs), env_state, action, self.env_params, self.unique_env_reset_states
+                )
+                
+                return (next_env_state, next_obs, hstate, rng), info
+            
+            self.rng, rollout_rng = jax.random.split(self.rng)
+            _, info = jax.lax.scan(
+                eval_step, 
+                (env_state, obs, hstate, rollout_rng), 
+                None, 
+                length=self.env_params.max_timesteps
+            )
+            
+            returned_episodes = info.get("returned_episode", jnp.zeros_like(info.get("GoalR", jnp.zeros(()))))
+            solved = info.get("returned_episode_solved", info.get("GoalR", jnp.zeros(())))
+            returns = info.get("returned_episode_returns", jnp.zeros_like(solved))
+            
+            episodes_completed = jnp.sum(returned_episodes, axis=0)
+            sum_solved = jnp.sum(jnp.where(returned_episodes, solved, 0), axis=0)
+            sum_returns = jnp.sum(jnp.where(returned_episodes, returns, 0), axis=0)
+            
+            solve_rate = jnp.where(episodes_completed > 0, sum_solved / episodes_completed, 0.0)
+            avg_return = jnp.where(episodes_completed > 0, sum_returns / episodes_completed, 0.0)
+            
+            return jnp.stack([solve_rate, avg_return], axis=-1)
+
         def advance(self):
             policy2env_pairing = self.match()
             policy_state, per_env_perf_history = self.train(policy2env_pairing)
@@ -221,5 +275,9 @@ class PolicyRepo(ABC):
 
         @abstractmethod
         def update(self,policy_state: PolicyState, per_env_perf_history: dict, policy2env_pairing: jax.Array) -> None:
+            pass
+
+        @abstractmethod
+        def evaluate(self) -> jax.Array:
             pass
   
