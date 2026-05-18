@@ -1,4 +1,6 @@
+import math
 import numpy as np
+import matplotlib.pyplot as plt
 
 def append_trajectory_metrics(traj_info, episode_history):
     done_mask = np.array(traj_info["returned_episode"])
@@ -32,3 +34,42 @@ def append_trajectory_metrics(traj_info, episode_history):
         episode_history.setdefault("solved", [list() for _ in range(G)])[g].extend(ep_solved.tolist())
 
     return episode_history
+
+def plot_env_pixel_grid(env_reset_obs_pixel, cols=4, rotate=True, title=None):
+    images = np.asarray(env_reset_obs_pixel)
+    num_envs = images.shape[0]
+    cols = min(cols, num_envs)
+    rows = math.ceil(num_envs / cols)
+
+    fig, axes = plt.subplots(
+        rows,
+        cols,
+        figsize=(3.6 * cols, 3.8 * rows),
+        constrained_layout=True,
+    )
+    axes = np.atleast_1d(axes).ravel()
+
+    for idx, ax in enumerate(axes):
+        if idx >= num_envs:
+            ax.axis("off")
+            continue
+
+        img = images[idx]
+        if rotate:
+            img = np.rot90(img, k=1)
+
+        ax.imshow(img, interpolation="nearest")
+        ax.set_xticks([])
+        ax.set_yticks([])
+
+        for spine in ax.spines.values():
+            spine.set_visible(True)
+            spine.set_linewidth(1.0)
+            spine.set_color("#9a9a9a")
+
+        ax.set_xlabel(f"Env {idx}", labelpad=8, fontsize=10)
+
+    if title is not None:
+        fig.suptitle(title, fontsize=14, fontweight="semibold")
+
+    return fig, axes
