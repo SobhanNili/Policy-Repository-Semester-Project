@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 import jax.numpy as jnp
 from apa.utils.network import make_network, init_random_policy, init_network_from_params
-from apa.utils.ppo import make_ppo_step
+from apa.utils.ppo import make_ppo_step, perform_generic_jitted_rollout
 from apa.utils.log import append_trajectory_metrics
 from kinetix.render.renderer_pixels import make_render_pixels_rl
 from apa.utils.env import make_env_from_config
@@ -116,44 +116,28 @@ class PolicyRepo(ABC):
             hstate = jax.tree.map(lambda x: x[:, 0], self.policy_repo.hstate)
             params = self.policy_repo.train_state.params
 
-            def eval_step(carry, _):
-                env_state, obs, hstate, rng = carry
-                rng, _rng = jax.random.split(rng)
-                
-                def single_policy_apply(p, h, o):
-                    # FIX: Model expects (T, B, N, L). 
-                    # We add T=1 and B=1 dimensions manually.
+            def network_apply(p, h, o):
+                def single_policy_apply(p_, h_, o_):
                     ac_in = (
-                        jax.tree.map(lambda x: x[None, None, ...], o), 
-                        jnp.zeros((1, 1), dtype=bool) # (T=1, B=1)
+                        jax.tree.map(lambda x: x[None, None, ...], o_), 
+                        jnp.zeros((1, 1), dtype=bool) 
                     )
-                    new_h, pi, _ = self.network.apply(p, h, ac_in)
+                    new_h, pi, _ = self.network.apply(p_, h_, ac_in)
                     return new_h, pi
-
-                # Pairs params[i], hstate[i], obs[i] for each of the P policies
-                hstate, pi = jax.vmap(single_policy_apply)(params, hstate, obs)
+                return jax.vmap(single_policy_apply)(p, h, o)
                 
-                # pi.sample() returns (P, T=1, B=1, Action)
-                # We squeeze the T and B dimensions to get (P, Action)
-                action = pi.sample(seed=_rng).squeeze((1, 2))
-                
-                # Step environments in parallel
-                rng, _rng = jax.random.split(rng)
-                next_obs, next_env_state, _, done, _ = jax.vmap(self.env.step, in_axes=(0, 0, 0, None, 0))(
-                    jax.random.split(_rng, self.num_policies), env_state, action, self.env_params, reset_states
+            def env_step(rng, states, actions, resets):
+                step_rngs = jax.random.split(rng, self.num_policies)
+                next_obs, next_env_state, _, done, info = jax.vmap(self.env.step, in_axes=(0, 0, 0, None, 0))(
+                    step_rngs, states, actions, self.env_params, resets
                 )
-                
-                # Render current state
-                pixel_obs = jax.vmap(self.pixel_renderer)(env_state.env_state).image # (P, 125, 125, 3)
-                
-                return (next_env_state, next_obs, hstate, rng), pixel_obs
+                pixel_obs = jax.vmap(self.pixel_renderer)(next_env_state.env_state).image
+                return next_obs, next_env_state, _, done, pixel_obs
 
             self.rng, rollout_rng = jax.random.split(self.rng)
-            _, video_frames = jax.lax.scan(
-                eval_step, 
-                (env_state, obs, hstate, rollout_rng), 
-                None, 
-                length=self.env_params.max_timesteps
+            video_frames = perform_generic_jitted_rollout(
+                network_apply, env_step, params, hstate, env_state, obs, 
+                reset_states, rollout_rng, self.env_params.max_timesteps
             )
             
             # VIDEO GENERATION
@@ -212,34 +196,26 @@ class PolicyRepo(ABC):
             env_state = self.unique_env_reset_states
             obs = jax.vmap(self.env.get_obs)(env_state.env_state)
             
-            def eval_step(carry, _):
-                env_state, obs, hstate, rng = carry
-                rng, _rng = jax.random.split(rng)
-                
-                def single_policy_apply(p, h, o):
+            def network_apply(p, h, o):
+                def single_policy_apply(p_, h_, o_):
                     ac_in = (
-                        jax.tree.map(lambda x: x[None, None, ...], o), 
+                        jax.tree.map(lambda x: x[None, None, ...], o_), 
                         jnp.zeros((1, 1), dtype=bool)
                     )
-                    new_h, pi, _ = self.network.apply(p, h, ac_in)
+                    new_h, pi, _ = self.network.apply(p_, h_, ac_in)
                     return new_h, pi
-
-                hstate, pi = jax.vmap(single_policy_apply)(params, hstate, obs)
-                action = pi.sample(seed=_rng).squeeze((1, 2))
+                return jax.vmap(single_policy_apply)(p, h, o)
                 
-                rng, _rng = jax.random.split(rng)
-                next_obs, next_env_state, _, done, info = jax.vmap(self.env.step, in_axes=(0, 0, 0, None, 0))(
-                    jax.random.split(_rng, self.num_distinct_envs), env_state, action, self.env_params, self.unique_env_reset_states
+            def env_step(rng, states, actions, resets):
+                step_rngs = jax.random.split(rng, self.num_distinct_envs)
+                return jax.vmap(self.env.step, in_axes=(0, 0, 0, None, 0))(
+                    step_rngs, states, actions, self.env_params, resets
                 )
-                
-                return (next_env_state, next_obs, hstate, rng), info
-            
+
             self.rng, rollout_rng = jax.random.split(self.rng)
-            _, info = jax.lax.scan(
-                eval_step, 
-                (env_state, obs, hstate, rollout_rng), 
-                None, 
-                length=self.env_params.max_timesteps
+            info = perform_generic_jitted_rollout(
+                network_apply, env_step, params, hstate, env_state, obs, 
+                self.unique_env_reset_states, rollout_rng, self.env_params.max_timesteps
             )
             
             returned_episodes = info.get("returned_episode", jnp.zeros_like(info.get("GoalR", jnp.zeros(()))))

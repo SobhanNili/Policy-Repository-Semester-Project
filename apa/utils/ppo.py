@@ -1,5 +1,6 @@
 import jax
 import jax.numpy as jnp
+from functools import partial
 from typing import NamedTuple, Any
 
 class Transition(NamedTuple):
@@ -144,3 +145,37 @@ def make_ppo_step(config, env, env_params):
         return train_state, hstate, obs, env_state, losses, traj.info
 
     return jax.jit(ppo_step)
+
+@partial(jax.jit, static_argnames=['network_apply', 'env_step', 'rollout_length'])
+def perform_generic_jitted_rollout(network_apply, env_step, params, hstate, env_state, obs, resets, rng, rollout_length):
+    """
+    A generic jitted rollout utility function.
+    Given matching Pytrees constraints sizes (usually P x B matrices setup), rolls out execution for given steps.
+    """
+    def eval_step(carry, _):
+        env_state, obs, hstate, step_rng = carry
+        
+        # Split rng for action selection
+        step_rng, pi_rng = jax.random.split(step_rng)
+        
+        # Usually obs needs an extra time dimension prepended -> (1, ...) for the network apply
+        # We assume the caller handles whatever dimension constraints inside network_apply closure
+        hstate, pi = network_apply(params, hstate, obs)
+        
+        action = jnp.squeeze(pi.sample(seed=pi_rng)) # Removes the temporary Time dim
+        
+        step_rng, env_rng = jax.random.split(step_rng)
+        
+        next_obs, next_env_state, _, _, info = env_step(
+            env_rng, env_state, action, resets
+        )
+        
+        return (next_env_state, next_obs, hstate, step_rng), info
+
+    _, info = jax.lax.scan(
+        eval_step, 
+        (env_state, obs, hstate, rng), 
+        None, 
+        length=rollout_length
+    )
+    return info
