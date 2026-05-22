@@ -270,14 +270,32 @@ class PolicyRepo(ABC):
 
         @abstractmethod
         def match(self) -> jax.Array:
-            """Should return policy2env_pairing"""
+            """Determines which environment each policy should be trained on.
+            
+            Returns:
+                jax.Array: An array of shape (num_policies,) containing the index of the 
+                environment assigned to each policy.
+            """
             pass
 
         @abstractmethod
         def update(self,policy_state: PolicyState, per_env_perf_history: dict, policy2env_pairing: jax.Array) -> None:
+            """Updates the repository's internal state post-training.
+            
+            Args:
+                policy_state (PolicyState): The updated policy networks and hidden states after PPO training.
+                per_env_perf_history (dict): Performance metrics (returns, lengths, solve rates) of policies during the training step.
+                policy2env_pairing (jax.Array): The environment assignments used for the training session.
+            """
             pass
 
         @abstractmethod
         def evaluate(self) -> jax.Array:
+            """Evaluates the current repository set of policies.
+            
+            Returns:
+                jax.Array: An array of shape (num_distinct_envs, 2) returning [solve_rate, avg_return] 
+                for each environment, evaluated under the repository's policy-to-environment assignment.
+            """
             pass
   

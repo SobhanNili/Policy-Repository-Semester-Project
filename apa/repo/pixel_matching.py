@@ -17,6 +17,16 @@ class PolicyPerfHistory: # supposed to be vmapped. Skill index is same as the ba
 
 class PixelMatchingRepo(PolicyRepo):
     def __init__(self, config, batched_env_reset_states, rng, env_pool_size: int, history_window: int, policy_success_threshold: float = 0.5) -> None:
+        """Initializes a repository that matches policies to visually similar environments.
+        
+        Args:
+            config: Configuration dictionary.
+            batched_env_reset_states: Batched initial level states.
+            rng: JAX random key.
+            env_pool_size (int): Number of candidate environments sampled to form a matching pool.
+            history_window (int): Number of past repository steps to consider when tracking a policy's successes.
+            policy_success_threshold (float): The minimum average solve rate needed for an environment to be considered a 'success' in history.
+        """
         # history_window: window of how much many past repo steps to consider
         # env_pool_size: number of envs the policies can get matched to
         super().__init__(config, batched_env_reset_states, rng)
@@ -27,6 +37,15 @@ class PixelMatchingRepo(PolicyRepo):
         self.policy_perf_hist = PolicyPerfHistory(None,None)
 
     def match(self) -> jax.Array:
+        """Assigns policies to environments based on visual similarity to past successes.
+        
+        For each policy, it samples a candidate pool of `env_pool_size` environments and scores them.
+        The candidate visually closest to the policy's previously solved environments is chosen.
+        For the first step (no history), environments are assigned completely uniformly at random.
+        
+        Returns:
+            jax.Array: Assignment array of shape (num_policies,).
+        """
         self.rng, sub_rng = jr.split(self.rng)
         if self.policy_perf_hist.matched_envs is None:
             # random assignment for the first step
@@ -46,6 +65,18 @@ class PixelMatchingRepo(PolicyRepo):
         return policy2env_pairing
     
     def score_policy2env_pairing(self, env_pool_indices: jnp.ndarray) -> jnp.ndarray:
+        """Scores candidate environments based on pixel-wise similarity to a policy's past successes.
+        
+        The score is inversely proportional to the mean-squared-error (MSE) between the initial pixel 
+        observation of the candidate environment and the most visually similar environment the policy 
+        has successfully solved in the recent `history_window`. 
+        
+        Args:
+            env_pool_indices (jnp.ndarray): Indices of the candidate environment pool.
+            
+        Returns:
+            jnp.ndarray: Scores array of shape (num_policies, len(env_pool_indices)).
+        """
         pool_pixel_obs = self.initial_pixel_obs[env_pool_indices] # (E_pool, 125, 125, 3)
 
         # Fix: Check the time dimension (axis 1), and slice the last `history_window` steps
@@ -89,6 +120,16 @@ class PixelMatchingRepo(PolicyRepo):
         return policy2env_scores
     
     def update(self, policy_state: PolicyState, per_env_perf_history: dict, policy2env_pairing: jax.Array) -> None:
+        """Saves current policy weights and appends outcomes to the tracking history.
+        
+        This history of pairings and solve rates is central to the PixelMatching's 
+        scoring mechanism in the next `match` phase.
+        
+        Args:
+            policy_state (PolicyState): The updated policy networks after PPO training.
+            per_env_perf_history (dict): Performance metrics collected across the training phase.
+            policy2env_pairing (jax.Array): The environments assigned in the recent training step.
+        """
         self.policy_repo = policy_state # for now no pruning
 
         # update running stats
@@ -116,6 +157,14 @@ class PixelMatchingRepo(PolicyRepo):
             )
 
     def evaluate(self) -> jax.Array:
+        """Pairs each distinct environment with the policy most likely to solve it, based on visual similarity.
+        
+        It computes the visual similarity score of every environment against every policy's success history, 
+        and assigns the highest-scoring policy to each environment for evaluation.
+        
+        Returns:
+            jax.Array: Array of shape (num_distinct_envs, 2) containing [solve_rate, avg_return].
+        """
         self.rng, sub_rng = jr.split(self.rng)
         
         if self.policy_perf_hist.is_empty():
