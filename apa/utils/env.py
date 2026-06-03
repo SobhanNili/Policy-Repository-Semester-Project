@@ -85,45 +85,67 @@ def load_and_replicate_levels(
     
     return wrapped
 
-def count_active_components(env_state) -> dict:
+COMPONENT_NAMES = [
+    "n_polygons",       # 0: number of active polygon shapes
+    "n_circles",        # 1: number of active circle shapes
+    "n_joints",         # 2: number of active joints
+    "n_thrusters",      # 3: number of active thrusters
+    "n_shapes",         # 4: total active shapes (polygons + circles)
+    "n_floor_shapes",   # 5: shapes with role 0 (static floor/background)
+    "n_green_shapes",   # 6: shapes with role 1 (agent-controlled green)
+    "n_blue_shapes",    # 7: shapes with role 2 (agent-controlled blue)
+    "n_red_shapes",     # 8: shapes with role 3 (misc/rare)
+]
+
+def count_active_components(env_state) -> jax.Array:
     """Count the number of active (non-padded) components in an EnvState.
-    
-    Useful for inspecting what a generated or loaded level actually contains,
-    as opposed to the maximum capacity set by static_env_params.
-    
+
+    Returns a 1D JAX array where each index corresponds to a component type.
+    Use the COMPONENT_NAMES list to map indices to names.
+
     Args:
-        env_state: An EnvState pytree (from env.reset or env_reset_states.env_state).
-    
+        env_state: An EnvState pytree.
+
     Returns:
-        dict with JAX scalar arrays — call .item() to get Python ints.
+        jax.Array of shape (9,) with counts in this order:
+            0: n_polygons      — active polygon shapes
+            1: n_circles       — active circle shapes
+            2: n_joints        — active joints
+            3: n_thrusters     — active thrusters
+            4: n_shapes        — total active shapes (polygons + circles)
+            5: n_floor_shapes  — shapes with role 0 (static floor/background)
+            6: n_green_shapes  — shapes with role 1 (agent-controlled green)
+            7: n_blue_shapes   — shapes with role 2 (agent-controlled blue)
+            8: n_red_shapes    — shapes with role 3 (misc/rare)
+
+    Example — single env:
+        stats = count_active_components(single_env)
+        print(f"Polygons: {int(stats[0])}, Circles: {int(stats[1])}")
+
+    Example — batch of envs (shape (E, C, ...)):
+        all_stats = jax.vmap(jax.vmap(count_active_components))(env_states)
+        # all_stats shape: (num_envs, num_copies, 9)
+        print(f"Env 0 polys: {int(all_stats[0, 0, 0])}")
     """
     active_polys = env_state.polygon.active
     active_circles = env_state.circle.active
     active_joints = env_state.joint.active
     active_thrusters = env_state.thruster.active
 
-    return {
-        # Basic counts
-        "n_polygons": jnp.sum(active_polys),
-        "n_circles": jnp.sum(active_circles),
-        "n_joints": jnp.sum(active_joints),
-        "n_thrusters": jnp.sum(active_thrusters),
-        "n_shapes": jnp.sum(active_polys) + jnp.sum(active_circles),
+    n_polygons = jnp.sum(active_polys)
+    n_circles = jnp.sum(active_circles)
 
-        # Shape roles (only active shapes matter)
-        "n_floor_shapes": jnp.sum(
-            (env_state.polygon_shape_roles == 0) & active_polys
-        ),
-        "n_green_shapes": (
-            jnp.sum((env_state.polygon_shape_roles == 1) & active_polys) +
-            jnp.sum((env_state.circle_shape_roles == 1) & active_circles)
-        ),
-        "n_blue_shapes": (
-            jnp.sum((env_state.polygon_shape_roles == 2) & active_polys) +
-            jnp.sum((env_state.circle_shape_roles == 2) & active_circles)
-        ),
-        "n_red_shapes": (
-            jnp.sum((env_state.polygon_shape_roles == 3) & active_polys) +
-            jnp.sum((env_state.circle_shape_roles == 3) & active_circles)
-        ),
-    }
+    return jnp.array([
+        n_polygons,                                                      # 0
+        n_circles,                                                       # 1
+        jnp.sum(active_joints),                                          # 2
+        jnp.sum(active_thrusters),                                       # 3
+        n_polygons + n_circles,                                          # 4
+        jnp.sum((env_state.polygon_shape_roles == 0) & active_polys),    # 5
+        jnp.sum((env_state.polygon_shape_roles == 1) & active_polys) +   # 6
+        jnp.sum((env_state.circle_shape_roles == 1) & active_circles),
+        jnp.sum((env_state.polygon_shape_roles == 2) & active_polys) +   # 7
+        jnp.sum((env_state.circle_shape_roles == 2) & active_circles),
+        jnp.sum((env_state.polygon_shape_roles == 3) & active_polys) +   # 8
+        jnp.sum((env_state.circle_shape_roles == 3) & active_circles),
+    ])
