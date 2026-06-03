@@ -10,10 +10,11 @@ import numpy as np
 class PolicyPerfHistory: # supposed to be vmapped. Skill index is same as the batch index
     matched_envs: jnp.ndarray
     step_perf: jnp.ndarray
+    match_score: jnp.ndarray
 
     # (P, T)
     def is_empty(self):
-        return self.matched_envs is None or self.step_perf is None
+        return self.matched_envs is None or self.step_perf is None or self.match_score is None
 
 class PixelMatchingRepo(PolicyRepo):
     def __init__(self, config, batched_env_reset_states, rng, env_pool_size: int, history_window: int, policy_success_threshold: float = 0.5) -> None:
@@ -34,7 +35,8 @@ class PixelMatchingRepo(PolicyRepo):
         self.env_pool_size = env_pool_size
         self.history_window = history_window
         self.policy_success_threshold = policy_success_threshold
-        self.policy_perf_hist = PolicyPerfHistory(None,None)
+        self.policy_perf_hist = PolicyPerfHistory(None, None, None)
+        self._last_match_score = None
 
     def match(self) -> jax.Array:
         """Assigns policies to environments based on visual similarity to past successes.
@@ -50,6 +52,7 @@ class PixelMatchingRepo(PolicyRepo):
         if self.policy_perf_hist.matched_envs is None:
             # random assignment for the first step
             policy2env_pairing = jr.choice(sub_rng,self.num_distinct_envs,shape=(self.num_policies,),replace=True)
+            self._last_match_score = jnp.zeros((self.num_policies, 1))
         else:
             env_pool_indices = jr.choice(sub_rng,self.num_distinct_envs,shape=(self.env_pool_size,),replace=False)
             policy2env_scores = self.score_policy2env_pairing(env_pool_indices) # Shape: (P, E_pool)
@@ -58,6 +61,9 @@ class PixelMatchingRepo(PolicyRepo):
             self.rng, sub_rng = jr.split(self.rng)
             noise = jr.uniform(sub_rng, policy2env_scores.shape, minval=0.0, maxval=1e-5) # for tie-breaking in the first step, so not all policies fall into the same env. 
             best_pool_indices = jnp.argmax(policy2env_scores + noise, axis=1) # Shape: (P,)
+            self._last_match_score = jnp.take_along_axis(
+                policy2env_scores, best_pool_indices[:, None], axis=1
+            )
             
             # Map back to the actual environment indices
             policy2env_pairing = env_pool_indices[best_pool_indices] # Shape: (P,)
@@ -135,6 +141,7 @@ class PixelMatchingRepo(PolicyRepo):
         # update running stats
         policy2env_pairing = policy2env_pairing.reshape((self.num_policies,1))
         policy_step_solve_rate = jnp.zeros((self.num_policies,1))
+        match_score = self._last_match_score if self._last_match_score is not None else jnp.zeros((self.num_policies, 1))
 
         for policy_idx in range(self.num_policies):
             policy_solved = np.array(per_env_perf_history['solved'][policy_idx])
@@ -145,6 +152,7 @@ class PixelMatchingRepo(PolicyRepo):
         if self.policy_perf_hist.is_empty():
             self.policy_perf_hist.matched_envs = policy2env_pairing
             self.policy_perf_hist.step_perf = policy_step_solve_rate
+            self.policy_perf_hist.match_score = match_score
         else:
             # append across repo_step dim
             self.policy_perf_hist.matched_envs  = jnp.concatenate(
@@ -153,6 +161,10 @@ class PixelMatchingRepo(PolicyRepo):
             )
             self.policy_perf_hist.step_perf  = jnp.concatenate(
                 [self.policy_perf_hist.step_perf , policy_step_solve_rate],
+                axis=1
+            )
+            self.policy_perf_hist.match_score = jnp.concatenate(
+                [self.policy_perf_hist.match_score , match_score],
                 axis=1
             )
 
