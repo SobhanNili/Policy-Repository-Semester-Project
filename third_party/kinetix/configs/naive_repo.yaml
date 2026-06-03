@@ -1,6 +1,6 @@
 defaults:
   - env: entity
-  - env_size: s
+  - env_size: l
   - model:
     - model-base
     - model-transformer
@@ -25,5 +25,6 @@ num_repo_updates: 20 # how many skill repo updates
 num_policies: 5 # fixed number of policies for now
 
 use_wandb: false
+wandb_runname: 'EVAL-matching-M-env'
 video_frequency: 1
 # NOTE: each env automatically resets after 256 steps
