@@ -13,52 +13,77 @@ class Transition(NamedTuple):
     info: Any
 
 
-def ppo_update(config, train_state, traj, advantages, targets, init_hstate, rng):
-    def loss_fn(params, init_hstate, traj_batch, gae, targets):
+def ppo_update(config, train_state, traj, advantages, targets, init_hstate, rng, env_mask=None):
+    """PPO update with optional per-env loss masking.
+
+    Args:
+        env_mask: optional (B,) boolean or float mask. 1.0 = active, 0.0 = inactive.
+                  Inactive envs contribute zero gradient.  If None, all envs are active.
+    """
+    # Normalise mask: None → all ones; ensure float32
+    if env_mask is None:
+        env_mask = jnp.ones(traj.action.shape[1], dtype=jnp.float32)
+    else:
+        env_mask = env_mask.astype(jnp.float32)
+
+    def loss_fn(params, init_hstate, traj_batch, gae, targets, mask_batch):
         _, pi, value = train_state.apply_fn(params, init_hstate[0], (traj_batch.obs, traj_batch.done))
         log_prob = pi.log_prob(traj_batch.action)
 
         value_pred_clipped = traj_batch.value + (value - traj_batch.value).clip(
             -config["clip_eps"], config["clip_eps"]
         )
-        value_loss = 0.5 * jnp.maximum(
+        # Masked value loss — mask is (B_mb,) broadcast over action dims if any
+        per_env_value_loss = 0.5 * jnp.maximum(
             jnp.square(value - targets),
             jnp.square(value_pred_clipped - targets),
-        ).mean()
+        )
+        value_loss = jnp.sum(mask_batch * per_env_value_loss) / jnp.maximum(jnp.sum(mask_batch), 1.0)
 
-        gae = (gae - gae.mean()) / (gae.std() + 1e-8)
+        # GAE normalisation over active envs only
+        gae = (gae - jnp.sum(mask_batch * gae) / jnp.maximum(jnp.sum(mask_batch), 1.0)) / (
+            jnp.sqrt(jnp.sum(mask_batch * jnp.square(gae)) / jnp.maximum(jnp.sum(mask_batch), 1.0)) + 1e-8
+        )
         ratio = jnp.exp(log_prob - traj_batch.log_prob)
 
-        policy_loss = -jnp.minimum(
+        per_env_policy_loss = -jnp.minimum(
             ratio * gae,
             jnp.clip(ratio, 1.0 - config["clip_eps"], 1.0 + config["clip_eps"]) * gae,
-        ).mean()
+        )
+        policy_loss = jnp.sum(mask_batch * per_env_policy_loss) / jnp.maximum(jnp.sum(mask_batch), 1.0)
 
-        entropy = pi.entropy().mean()
+        per_env_entropy = pi.entropy()
+        entropy = jnp.sum(mask_batch * per_env_entropy) / jnp.maximum(jnp.sum(mask_batch), 1.0)
         total_loss = policy_loss + config["vf_coef"] * value_loss - config["ent_coef"] * entropy
         return total_loss, (value_loss, policy_loss, entropy)
 
     grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
 
+    # Permute the main batch elements and the mask separately because
+    # the mask has batch on axis 0 (no leading time dimension).
+    permutation = jax.random.permutation(rng, traj.action.shape[1])
+    batch_no_mask = (init_hstate, traj, advantages, targets)
+    batch_no_mask = jax.tree.map(lambda x: jnp.take(x, permutation, axis=1), batch_no_mask)
+    mask_permuted = env_mask[permutation]  # (B,) permuted along axis 0
+
+    # Reshape main elements for minibatches
+    batch_no_mask = jax.tree.map(
+        lambda x: jnp.swapaxes(
+            jnp.reshape(x, [x.shape[0], config["num_minibatches"], -1] + list(x.shape[2:])),
+            1, 0,
+        ),
+        tuple(batch_no_mask),
+    )
+    # Mask: (B,) → (num_minibatches, B_per_mb)
+    mask_arr = jnp.reshape(mask_permuted, [config["num_minibatches"], -1])
+
     def minibatch_update(train_state, batch):
-        init_hstate, traj_batch, advantages, targets = batch
-        (loss, _), grads = grad_fn(train_state.params, init_hstate, traj_batch, advantages, targets)
+        init_hstate, traj_batch, advantages, targets, mask_batch = batch
+        (loss, _), grads = grad_fn(train_state.params, init_hstate, traj_batch, advantages, targets, mask_batch)
         train_state = train_state.apply_gradients(grads=grads)
         return train_state, loss
 
-    batch = (init_hstate, traj, advantages, targets)
-
-    permutation = jax.random.permutation(rng, traj.action.shape[1])
-    batch = jax.tree.map(lambda x: jnp.take(x, permutation, axis=1), batch)
-
-    batch = jax.tree.map(
-        lambda x: jnp.swapaxes(
-            jnp.reshape(x, [x.shape[0], config["num_minibatches"], -1] + list(x.shape[2:])),
-            1,
-            0,
-        ),
-        batch,
-    )
+    batch = batch_no_mask + (mask_arr,)
 
     def epoch_update(train_state, _):
         train_state, losses = jax.lax.scan(minibatch_update, train_state, batch)
@@ -124,7 +149,13 @@ def ppo_rollout(config, env, env_params, train_state, hstate, obs, env_state, rn
     return init_hstate, obs, env_state, traj, advantages, targets
 
 def make_ppo_step(config, env, env_params):
-    def ppo_step(train_state, hstate, obs, env_state, rollout_rngs, update_rngs, reset_state_override=None):
+    def ppo_step(train_state, hstate, obs, env_state, rollout_rngs, update_rngs, reset_state_override=None, env_mask=None):
+        """Executes PPO rollout + update for all policies.
+
+        Args:
+            env_mask: optional (P, B) float/bool mask. 1.0 = active env for that policy.
+                      Passed through to ppo_update for loss masking.
+        """
 
         def make_ppo_rollout(train_state, hstate, obs, env_state, rng, reset_state_override):
             return ppo_rollout(
@@ -132,15 +163,19 @@ def make_ppo_step(config, env, env_params):
                 reset_state_override=reset_state_override
             )
 
-        def make_ppo_update(train_state, traj, advantages, targets, hstate, rng):
-            return ppo_update(config, train_state, traj, advantages, targets, hstate, rng)
+        def make_ppo_update(train_state, traj, advantages, targets, hstate, rng, mask):
+            return ppo_update(config, train_state, traj, advantages, targets, hstate, rng, env_mask=mask)
 
         hstate, obs, env_state, traj, advantages, targets = jax.vmap(make_ppo_rollout)(
             train_state, hstate, obs, env_state, rollout_rngs, reset_state_override
         )
 
+        if env_mask is None:
+            P, B = jax.tree_util.tree_leaves(obs)[0].shape[:2]
+            env_mask = jnp.ones((P, B), dtype=jnp.float32)
+
         train_state, losses = jax.vmap(make_ppo_update)(
-            train_state, traj, advantages, targets, hstate, update_rngs
+            train_state, traj, advantages, targets, hstate, update_rngs, env_mask
         )
         return train_state, hstate, obs, env_state, losses, traj.info
 

@@ -3,31 +3,57 @@ import jax.random as jr
 import jax.numpy as jnp
 import jax
 
+
 class ConstantMatchingRepo(PolicyRepo):
-    """Always pairs same env to a policy. Only to test if the training is being done properly."""
+    """Always pairs the same envs to the same policies.  A test harness that
+    verifies the training pipeline works correctly.
+
+    Flattens the constant (P, candidate_pool_size) pairing into a 1-D candidate
+    set so every env in the pairing is present every step.  One-hot affinity
+    routes each env's gradient to its owning policy.
+    """
+
     def __init__(self, config, unique_env_reset_states, rng) -> None:
         super().__init__(config, unique_env_reset_states, rng)
 
         self.rng, sub_rng = jr.split(self.rng)
-        self.constant_policy2env_pairing = jr.choice(sub_rng,self.num_distinct_envs,shape=(self.num_policies,),replace=False)
+        # Each policy gets candidate_pool_size distinct envs, constant forever.
+        def sample_for_policy(rng):
+            return jr.choice(rng, self.num_distinct_envs,
+                             shape=(self.candidate_pool_size,), replace=False)
+        rngs = jr.split(sub_rng, self.num_policies)
+        self.constant_pairing = jax.vmap(sample_for_policy)(rngs)  # (P, candidate_pool_size)
 
-    def match(self) -> jax.Array:
-        """Assigns the exact same environments to the same policies every time.
-        
-        Returns:
-            jax.Array: Constant assignment array of shape (num_policies,).
-        """
-        return self.constant_policy2env_pairing
-    
-    def update(self, policy_state: PolicyState, per_env_perf_history: dict, policy2env_pairing: jax.Array) -> None:
-        """Updates the repository with the trained policy state without tracking performance history.
-        
-        Args:
-            policy_state (PolicyState): The updated policy networks after PPO training.
-            per_env_perf_history (dict): Performance metrics collected across the training phase (ignored here).
-            policy2env_pairing (jax.Array): The environments assigned in the recent training step (ignored here).
-        """
-        self.policy_repo = policy_state # for now not paying attention to results
+    def sample_candidate_envs(self) -> jax.Array:
+        """Returns the flattened constant pairing — every pre-assigned env,
+        every step.  Size = P * candidate_pool_size (preserves config validation)."""
+        return self.constant_pairing.reshape(-1)  # (P * candidate_pool_size,)
 
-    def evaluate(self) -> jax.Array:
-        raise NotImplementedError
+    def compute_affinity(self, candidate_env_indices: jax.Array) -> jax.Array:
+        """One-hot affinity built from the known (P, S) block structure.
+
+        ``sample_candidate_envs`` returns ``constant_pairing.reshape(-1)``,
+        so position *i* belongs to policy ``p = i // candidate_pool_size``.
+        """
+        P = self.num_policies
+        S = self.candidate_pool_size
+        E_subset = candidate_env_indices.shape[0]  # = P * S
+        affinity = jnp.zeros((P, E_subset))
+        for i in range(E_subset):
+            p = i // S
+            affinity = affinity.at[p, i].set(1.0)
+        return affinity
+
+    def derive_assignment_mask(self, affinity: jax.Array) -> jax.Array:
+        """Pure argmax — no force-at-least-one post-processing.
+
+        The constant pairing may produce policies with all-zero affinity rows
+        when multiple policies happen to draw the same env.  Those policies
+        should genuinely get no active envs rather than being forcibly assigned
+        to a random env (which would break the test-harness invariant).
+        """
+        E_subset = affinity.shape[1]
+        assignments = jnp.argmax(affinity, axis=0)  # (E_subset,)
+        mask = jnp.zeros((E_subset, self.num_policies), dtype=bool)
+        mask = mask.at[jnp.arange(E_subset), assignments].set(True)
+        return mask
