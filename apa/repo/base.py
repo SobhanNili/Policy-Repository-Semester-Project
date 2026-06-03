@@ -4,7 +4,7 @@ from apa.utils.network import make_network, init_random_policy, init_network_fro
 from apa.utils.ppo import make_ppo_step, perform_generic_jitted_rollout
 from apa.utils.log import append_trajectory_metrics
 from kinetix.render.renderer_pixels import make_render_pixels_rl
-from apa.utils.env import make_env_from_config
+from apa.utils.env import make_env_from_config, duplicate_env_states
 import jax.random as jr
 import jax.numpy as jnp
 import jax
@@ -31,7 +31,7 @@ class PolicyState(NamedTuple): # supposed to be vmapped. Skill index is same as 
     hstate: jax.Array # sake of compatibility
 
 class PolicyRepo(ABC):
-        def __init__(self,config,batched_env_reset_states,rng) -> None:
+        def __init__(self,config,unique_env_reset_states,rng) -> None:
             env, env_params, static_env_params = make_env_from_config(config)
             self.pixel_renderer = make_render_pixels_rl(env_params, static_env_params)
             self.network = make_network(config,env,env_params,static_env_params)
@@ -46,9 +46,11 @@ class PolicyRepo(ABC):
             self.num_copies_per_env = int(config['num_copies_per_env'])
             self.num_ppo_updates_per_repo_step = int(config['num_updates'])
 
-            self.batched_env_reset_states = batched_env_reset_states
-            self.unique_env_reset_states = jax.tree.map(lambda x: x[:, 0], batched_env_reset_states)
-            assert get_pytree_batch_size(self.unique_env_reset_states ) == self.num_distinct_envs
+            self.unique_env_reset_states = unique_env_reset_states
+            assert get_pytree_batch_size(self.unique_env_reset_states) == self.num_distinct_envs
+            self.batched_env_reset_states = duplicate_env_states(
+                unique_env_reset_states, self.num_copies_per_env
+            )
 
             self.policy_repo = self.init_policies()
             self.repo_step_counter:int = 0

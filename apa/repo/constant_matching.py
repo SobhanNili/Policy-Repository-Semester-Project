@@ -5,8 +5,8 @@ import jax
 
 class ConstantMatchingRepo(PolicyRepo):
     """Always pairs same env to a policy. Only to test if the training is being done properly."""
-    def __init__(self, config, batched_env_reset_states, rng) -> None:
-        super().__init__(config, batched_env_reset_states, rng)
+    def __init__(self, config, unique_env_reset_states, rng) -> None:
+        super().__init__(config, unique_env_reset_states, rng)
 
         self.rng, sub_rng = jr.split(self.rng)
         self.constant_policy2env_pairing = jr.choice(sub_rng,self.num_distinct_envs,shape=(self.num_policies,),replace=False)

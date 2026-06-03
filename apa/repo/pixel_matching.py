@@ -17,12 +17,12 @@ class PolicyPerfHistory: # supposed to be vmapped. Skill index is same as the ba
         return self.matched_envs is None or self.step_perf is None or self.match_score is None
 
 class PixelMatchingRepo(PolicyRepo):
-    def __init__(self, config, batched_env_reset_states, rng, env_pool_size: int, history_window: int, policy_success_threshold: float = 0.5) -> None:
+    def __init__(self, config, unique_env_reset_states, rng, env_pool_size: int, history_window: int, policy_success_threshold: float = 0.5) -> None:
         """Initializes a repository that matches policies to visually similar environments.
         
         Args:
             config: Configuration dictionary.
-            batched_env_reset_states: Batched initial level states.
+            unique_env_reset_states: Unique (non-duplicated) initial level states, shape ``(num_envs, ...)``.
             rng: JAX random key.
             env_pool_size (int): Number of candidate environments sampled to form a matching pool.
             history_window (int): Number of past repository steps to consider when tracking a policy's successes.
@@ -30,7 +30,7 @@ class PixelMatchingRepo(PolicyRepo):
         """
         # history_window: window of how much many past repo steps to consider
         # env_pool_size: number of envs the policies can get matched to
-        super().__init__(config, batched_env_reset_states, rng)
+        super().__init__(config, unique_env_reset_states, rng)
         self.initial_pixel_obs = jax.vmap(lambda s: self.pixel_renderer(s.env_state))(self.unique_env_reset_states).image # (num_distinct_envs, 125, 125, 3)
         self.env_pool_size = env_pool_size
         self.history_window = history_window

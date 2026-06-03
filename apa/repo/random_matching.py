@@ -3,8 +3,8 @@ import jax.random as jr
 import jax
 
 class RandomMatchingRepo(PolicyRepo):
-    def __init__(self, config, batched_env_reset_states, rng) -> None:
-        super().__init__(config, batched_env_reset_states, rng)
+    def __init__(self, config, unique_env_reset_states, rng) -> None:
+        super().__init__(config, unique_env_reset_states, rng)
 
     def match(self) -> jax.Array:
         """Assigns each policy to a uniformly random environment.

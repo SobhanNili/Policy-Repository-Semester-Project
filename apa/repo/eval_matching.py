@@ -7,10 +7,10 @@ import numpy as np
 
 
 class EvalRepo(PolicyRepo):
-    def __init__(self, config, batched_env_reset_states, rng, env_pool_size: int, policy_eval_ep_count: int) -> None:
+    def __init__(self, config, unique_env_reset_states, rng, env_pool_size: int, policy_eval_ep_count: int) -> None:
         # env_pool_size: number of envs that the policy is tested on at each repo step before choosing one to get triained on 
         # policy_eval_ep_count: number of min episodes (in pessimistic way of episodes taking all the 256 steps) for the eval duration
-        super().__init__(config, batched_env_reset_states, rng)
+        super().__init__(config, unique_env_reset_states, rng)
         KINETIX_TRUNCATION_STEPS = 256
         self.env_pool_size = env_pool_size
         self.num_eval_steps = KINETIX_TRUNCATION_STEPS * policy_eval_ep_count
