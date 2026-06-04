@@ -1,4 +1,5 @@
 from apa.repo import PolicyRepo, PolicyState
+from apa.repo.base import get_pytree_batch_size
 import jax.random as jr
 import jax.numpy as jnp
 import jax
@@ -13,8 +14,8 @@ class ConstantMatchingRepo(PolicyRepo):
     routes each env's gradient to its owning policy.
     """
 
-    def __init__(self, config, unique_env_reset_states, rng) -> None:
-        super().__init__(config, unique_env_reset_states, rng)
+    def __init__(self, config, train_env_reset_states, rng) -> None:
+        super().__init__(config, train_env_reset_states, rng)
 
         self.rng, sub_rng = jr.split(self.rng)
         # Each policy gets candidate_pool_size distinct envs, constant forever.
@@ -29,7 +30,7 @@ class ConstantMatchingRepo(PolicyRepo):
         every step.  Size = P * candidate_pool_size (preserves config validation)."""
         return self.constant_pairing.reshape(-1)  # (P * candidate_pool_size,)
 
-    def compute_affinity(self, candidate_env_indices: jax.Array) -> jax.Array:
+    def compute_affinity(self, env_reset_states) -> jax.Array:
         """One-hot affinity built from the known (P, S) block structure.
 
         ``sample_candidate_envs`` returns ``constant_pairing.reshape(-1)``,
@@ -37,7 +38,7 @@ class ConstantMatchingRepo(PolicyRepo):
         """
         P = self.num_policies
         S = self.candidate_pool_size
-        E_subset = candidate_env_indices.shape[0]  # = P * S
+        E_subset = get_pytree_batch_size(env_reset_states)  # = P * S
         affinity = jnp.zeros((P, E_subset))
         for i in range(E_subset):
             p = i // S

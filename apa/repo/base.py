@@ -2,6 +2,7 @@ from abc import ABC, abstractmethod
 import jax.numpy as jnp
 from apa.utils.network import make_network, init_random_policy, init_network_from_params
 from apa.utils.ppo import make_ppo_step, perform_generic_jitted_rollout
+from apa.utils.log import frames_to_wandb_video
 from kinetix.render.renderer_pixels import make_render_pixels_rl
 from apa.utils.env import make_env_from_config, duplicate_env_states
 import jax.random as jr
@@ -39,7 +40,7 @@ class RepoStepLog(NamedTuple):
 
 
 class PolicyRepo(ABC):
-        def __init__(self,config,unique_env_reset_states,rng) -> None:
+        def __init__(self,config,train_env_reset_states,rng) -> None:
             env, env_params, static_env_params = make_env_from_config(config)
             self.pixel_renderer = make_render_pixels_rl(env_params, static_env_params)
             self.network = make_network(config,env,env_params,static_env_params)
@@ -49,26 +50,28 @@ class PolicyRepo(ABC):
             self.static_env_params = static_env_params
             self.config = config
             self.rng = rng
-            self.num_policies = config['num_policies']
+            self.num_policies = int(config['num_policies'])
             self.num_distinct_envs = int(config['num_train_envs'])
             self.num_copies_per_env = int(config['num_copies_per_env'])
-            self.candidate_pool_size = int(config.get('candidate_pool_size', config.get('step_env_pool_size', 1)))
-            self.eval_rollout_steps = int(config.get('eval_rollout_steps', 512))
+            self.candidate_pool_size = int(config['candidate_pool_size'])
+            self.eval_rollout_steps = int(config['eval_rollout_steps'])
             self.num_ppo_updates_per_repo_step = int(config['num_updates'])
+
+            num_minibatches = int(config['num_minibatches'])
 
             # Validate: total batch per policy must be divisible by num_minibatches
             batch_per_policy = self.candidate_pool_size * self.num_copies_per_env
-            if batch_per_policy % config['num_minibatches'] != 0:
+            if batch_per_policy % num_minibatches != 0:
                 raise ValueError(
                     f"candidate_pool_size ({self.candidate_pool_size}) * num_copies_per_env "
                     f"({self.num_copies_per_env}) = {batch_per_policy} "
-                    f"must be divisible by num_minibatches ({config['num_minibatches']})"
+                    f"must be divisible by num_minibatches ({num_minibatches})"
                 )
 
-            self.unique_env_reset_states = unique_env_reset_states
-            assert get_pytree_batch_size(self.unique_env_reset_states) == self.num_distinct_envs
-            self.batched_env_reset_states = duplicate_env_states(
-                unique_env_reset_states, self.num_copies_per_env
+            self.train_env_reset_states = train_env_reset_states
+            assert get_pytree_batch_size(self.train_env_reset_states) == self.num_distinct_envs
+            self.batched_train_env_reset_states = duplicate_env_states(
+                train_env_reset_states, self.num_copies_per_env
             )
 
             self.policy_repo = self.init_policies()
@@ -90,30 +93,28 @@ class PolicyRepo(ABC):
 
             return PolicyState(train_state,hstate)
 
-        def train(self, candidate_env_indices, active_mask):
+        def train(self, batched_env_states, active_mask):
             """Trains all policies on the shared candidate env batch with per-policy masking.
 
             All policies share the same E_subset × C environment batch.  The mask
             determines which envs are active for each policy's loss computation.
 
             Args:
-                candidate_env_indices: (E_subset,) — which distinct envs to use.
+                batched_env_states: (E_subset, C, ...) — pre-extracted batched env reset states.
                 active_mask: (E_subset, P) — binary; 1 = this env is active for this policy.
 
             Returns:
                 PolicyState with updated train_state and hstate.
             """
-            E_subset = candidate_env_indices.shape[0]
+            # batched_env_states: (E_subset, C, ...) — already extracted by caller
+            E_subset = get_pytree_batch_size(batched_env_states)
             C = self.num_copies_per_env
             B = E_subset * C
 
-            # All policies share the same envs
-            # batched_env_reset_states: (E, C, ...) → [candidate_env_indices] → (E_subset, C, ...)
-            reset_states = jax.tree.map(lambda x: x[candidate_env_indices], self.batched_env_reset_states)
             # Flatten to (B, ...)
             reset_states = jax.tree.map(
                 lambda x: x.reshape(-1, *x.shape[2:]),
-                reset_states
+                batched_env_states
             )
             # Tile to all policies: (P, B, ...)
             env_state = jax.tree.map(
@@ -163,30 +164,14 @@ class PolicyRepo(ABC):
             best_env_indices = jnp.array(best_env_indices)  # (P,)
 
             # One env per policy (single copy)
-            reset_states = jax.tree.map(lambda x: x[best_env_indices, 0], self.batched_env_reset_states)
+            reset_states = jax.tree.map(lambda x: x[best_env_indices, 0], self.batched_train_env_reset_states)
             env_state = reset_states
             obs = jax.vmap(self.env.get_obs)(env_state.env_state)
 
             hstate = jax.tree.map(lambda x: x[:, 0], self.policy_repo.hstate)
             params = self.policy_repo.train_state.params
 
-            def network_apply(p, h, o):
-                def single_policy_apply(p_, h_, o_):
-                    ac_in = (
-                        jax.tree.map(lambda x: x[None, None, ...], o_),
-                        jnp.zeros((1, 1), dtype=bool)
-                    )
-                    new_h, pi, _ = self.network.apply(p_, h_, ac_in)
-                    return new_h, pi
-                return jax.vmap(single_policy_apply)(p, h, o)
-
-            def env_step(rng, states, actions, resets):
-                step_rngs = jax.random.split(rng, P)
-                next_obs, next_env_state, _, done, info = jax.vmap(self.env.step, in_axes=(0, 0, 0, None, 0))(
-                    step_rngs, states, actions, self.env_params, resets
-                )
-                pixel_obs = jax.vmap(self.pixel_renderer)(next_env_state.env_state).image
-                return next_obs, next_env_state, _, done, pixel_obs
+            network_apply, env_step = self._make_eval_closures(P, render_pixels=True)
 
             self.rng, rollout_rng = jax.random.split(self.rng)
             video_frames = perform_generic_jitted_rollout(
@@ -198,12 +183,7 @@ class PolicyRepo(ABC):
             data2log = {"repo_step": self.repo_step_counter}
 
             for i in range(P):
-                obs_to_use = video_frames[:, i]
-                if obs_to_use.max() <= 1.0:
-                    obs_to_use = obs_to_use * 255.0
-                vid = obs_to_use.transpose(0, 3, 2, 1)
-                vid = vid[:, :, ::-1, :]
-                vid = vid.astype(np.uint8)
+                vid = frames_to_wandb_video(video_frames[:, i])
                 env_id = int(best_env_indices[i])
                 data2log[f"videos/policy_{i}_env_{env_id}"] = wandb.Video(vid, fps=15, format="gif")
 
@@ -244,7 +224,42 @@ class PolicyRepo(ABC):
 
             wandb.log(data2log)
 
-        def evaluate_pairing(self, pairing: jax.Array, rollout_steps: Optional[int] = None) -> jax.Array:
+        def _make_eval_closures(self, n_pairs: int, render_pixels: bool = False):
+            """Factory for (network_apply, env_step) closures used in frozen-policy rollouts.
+
+            Args:
+                n_pairs: number of parallel (policy, env) pairs being evaluated.
+                render_pixels: if True, env_step also returns pixel observations via
+                               ``self.pixel_renderer`` (used by ``log_vids2wandb``).
+
+            Returns:
+                (network_apply, env_step) callables compatible with
+                ``perform_generic_jitted_rollout``.
+            """
+            def network_apply(p, h, o):
+                def single_policy_apply(p_, h_, o_):
+                    ac_in = (
+                        jax.tree.map(lambda x: x[None, None, ...], o_),
+                        jnp.zeros((1, 1), dtype=bool)
+                    )
+                    new_h, pi, _ = self.network.apply(p_, h_, ac_in)
+                    return new_h, pi
+                return jax.vmap(single_policy_apply)(p, h, o)
+
+            def env_step(rng, states, actions, resets):
+                step_rngs = jax.random.split(rng, n_pairs)
+                next_obs, next_env_state, _, done, info = jax.vmap(
+                    self.env.step, in_axes=(0, 0, 0, None, 0)
+                )(step_rngs, states, actions, self.env_params, resets)
+                if render_pixels:
+                    pixel_obs = jax.vmap(self.pixel_renderer)(next_env_state.env_state).image
+                    return next_obs, next_env_state, _, done, pixel_obs
+                return next_obs, next_env_state, _, done, info
+
+            return network_apply, env_step
+
+        def evaluate_pairing(self, pairing: jax.Array, env_states,
+                             rollout_steps: int) -> jax.Array:
             """Evaluates a specific pairing of policies to environments.
 
             Supports two modes based on input shape:
@@ -255,16 +270,16 @@ class PolicyRepo(ABC):
 
             Args:
                 pairing: assignment array (1D or 2D).
-                rollout_steps: number of rollout steps (default: max_timesteps).
+                env_states: pytree of environment reset states to evaluate on.
+                rollout_steps: number of rollout steps.
             """
-            if rollout_steps is None:
-                rollout_steps = self.env_params.max_timesteps
+            n_envs = get_pytree_batch_size(env_states)
             if pairing.ndim == 1:
                 # env2policy: (E,) → (E, 2)
-                env_indices = jnp.arange(self.num_distinct_envs)
+                env_indices = jnp.arange(n_envs)
                 policy_indices = pairing  # (E,)
-                n_pairs = self.num_distinct_envs
-                output_shape = (self.num_distinct_envs, 2)
+                n_pairs = n_envs
+                output_shape = (n_envs, 2)
             elif pairing.ndim == 2:
                 # policy2env: (P, S) → (P, S, 2)
                 P, S = pairing.shape
@@ -278,25 +293,11 @@ class PolicyRepo(ABC):
             params = jax.tree.map(lambda x: x[policy_indices], self.policy_repo.train_state.params)
             hstate = jax.tree.map(lambda x: x[policy_indices, 0], self.policy_repo.hstate)
 
-            env_state = jax.tree.map(lambda x: x[env_indices], self.unique_env_reset_states)
+            env_state = jax.tree.map(lambda x: x[env_indices], env_states)
             obs = jax.vmap(self.env.get_obs)(env_state.env_state)
             resets = env_state  # same env set as reset-override targets
 
-            def network_apply(p, h, o):
-                def single_policy_apply(p_, h_, o_):
-                    ac_in = (
-                        jax.tree.map(lambda x: x[None, None, ...], o_),
-                        jnp.zeros((1, 1), dtype=bool)
-                    )
-                    new_h, pi, _ = self.network.apply(p_, h_, ac_in)
-                    return new_h, pi
-                return jax.vmap(single_policy_apply)(p, h, o)
-
-            def env_step(rng, states, actions, resets):
-                step_rngs = jax.random.split(rng, n_pairs)
-                return jax.vmap(self.env.step, in_axes=(0, 0, 0, None, 0))(
-                    step_rngs, states, actions, self.env_params, resets
-                )
+            network_apply, env_step = self._make_eval_closures(n_pairs, render_pixels=False)
 
             self.rng, rollout_rng = jax.random.split(self.rng)
             info = perform_generic_jitted_rollout(
@@ -326,7 +327,8 @@ class PolicyRepo(ABC):
             """
             P, E = self.num_policies, self.num_distinct_envs
             all_pairs = jnp.arange(E)[None, :].repeat(P, axis=0)  # (P, E)
-            return self.evaluate_pairing(all_pairs)
+            return self.evaluate_pairing(all_pairs, self.train_env_reset_states,
+                                         rollout_steps=self.eval_rollout_steps)
 
         def advance(self):
             """Execute one repository step: sample candidates, compute affinity,
@@ -335,13 +337,19 @@ class PolicyRepo(ABC):
             candidate_env_indices = self.sample_candidate_envs()
 
             # 2. Compute affinity (subclass defines the scoring logic)
-            affinity = self.compute_affinity(candidate_env_indices)
+            candidate_states = jax.tree.map(
+                lambda x: x[candidate_env_indices], self.train_env_reset_states
+            )
+            affinity = self.compute_affinity(candidate_states)
 
             # 3. Derive binary active mask
             active_mask = self.derive_assignment_mask(affinity)
 
             # 4. Masked PPO training
-            policy_state = self.train(candidate_env_indices, active_mask)
+            batched_candidate_states = jax.tree.map(
+                lambda x: x[candidate_env_indices], self.batched_train_env_reset_states
+            )
+            policy_state = self.train(batched_candidate_states, active_mask)
             self.policy_repo = policy_state
 
             # 5. Post-training frozen-policy evaluation
@@ -360,8 +368,6 @@ class PolicyRepo(ABC):
 
             self.repo_step_counter += 1
 
-        # ── New shared methods ──────────────────────────────────────────────
-
         def sample_candidate_envs(self) -> jax.Array:
             """Samples candidate_pool_size distinct envs uniformly at random.
             Override in subclasses for custom sampling (e.g. ConstantMatchingRepo)."""
@@ -370,15 +376,15 @@ class PolicyRepo(ABC):
                              shape=(self.candidate_pool_size,), replace=False)
 
         @abstractmethod
-        def compute_affinity(self, candidate_env_indices: jax.Array) -> jax.Array:
+        def compute_affinity(self, env_reset_states) -> jax.Array:
             """Computes softmax-normalised affinity scores across policies.
 
             Args:
-                candidate_env_indices: (E_subset,) — env indices to score.
+                env_reset_states: pytree of environment reset states to score.
 
             Returns:
-                (P, E_subset) float array where for each env e:
-                sum_p affinity[p, e] == 1.0 (column-wise softmax).
+                (P, n) float array where n = get_pytree_batch_size(env_reset_states),
+                and for each env e: sum_p affinity[p, e] == 1.0 (column-wise softmax).
             """
             pass
 
@@ -424,7 +430,8 @@ class PolicyRepo(ABC):
             """
             E_subset = candidate_env_indices.shape[0]
             all_pairs = jnp.tile(candidate_env_indices[None, :], (self.num_policies, 1))  # (P, E_subset)
-            results = self.evaluate_pairing(all_pairs, rollout_steps=self.eval_rollout_steps)  # (P, E_subset, 2)
+            results = self.evaluate_pairing(all_pairs, self.train_env_reset_states,
+                                            rollout_steps=self.eval_rollout_steps)  # (P, E_subset, 2)
 
             # Mask inactive pairs with NaN
             mask_expanded = active_mask.T[:, :, None]  # (P, E_subset, 1)
@@ -443,17 +450,22 @@ class PolicyRepo(ABC):
                 avg_return=avg_return,
             ))
 
-        def evaluate(self) -> jax.Array:
-            """Evaluates the repository by assigning each env to its best policy
-            according to the affinity scores.
+        def evaluate(self, eval_env_reset_states) -> tuple[jax.Array, jax.Array, jax.Array]:
+            """Evaluates the repository on a set of evaluation environments.
+
+            Args:
+                eval_env_reset_states: pytree of evaluation env reset states.
 
             Returns:
-                jax.Array of shape (num_distinct_envs, 2) with [solve_rate, avg_return].
+                Tuple of (affinity, env2policy, eval_metrics):
+                - affinity: (P, E_eval) array of affinity scores for each policy-env pair
+                - env2policy: (E_eval,) array mapping each eval env to its assigned policy
+                - eval_metrics: (E_eval, 2) array with [solve_rate, avg_return] for each eval env under its assigned policy.
             """
-            all_envs = jnp.arange(self.num_distinct_envs)
-            affinity = self.compute_affinity(all_envs)  # (P, E)
-            env2policy = jnp.argmax(affinity, axis=0)   # (E,)
-            return self.evaluate_pairing(env2policy)
+            affinity = self.compute_affinity(eval_env_reset_states)
+            env2policy = jnp.argmax(affinity, axis=0)
+            eval_metrics = self.evaluate_pairing(env2policy, eval_env_reset_states, rollout_steps=self.eval_rollout_steps)
+            return affinity, env2policy, eval_metrics
 
         # ── Hook (non-abstract, overridable) ─────────────────────────────────
 

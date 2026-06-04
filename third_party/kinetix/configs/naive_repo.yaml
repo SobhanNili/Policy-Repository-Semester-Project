@@ -6,6 +6,7 @@ defaults:
     - model-transformer
     - model-perm-invariant-mlp # for compatibility
   - train_levels: s # or random
+  - eval: s
   - learning:
     - ppo-base
     - ppo-rnn

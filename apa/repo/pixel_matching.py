@@ -5,23 +5,26 @@ import jax
 from typing import Optional
 import numpy as np
 
+from apa.repo.base import get_pytree_batch_size
+
 
 class PixelMatchingRepo(PolicyRepo):
-    def __init__(self, config, unique_env_reset_states, rng,
+    def __init__(self, config, train_env_reset_states, rng,
                  history_window: int, policy_success_threshold: float = 0.5) -> None:
         """Repository that matches policies to visually similar environments.
 
         Args:
             config: Configuration dictionary.
-            unique_env_reset_states: Unique initial level states, shape ``(E, ...)``.
+            train_env_reset_states: Training level states, shape ``(E, ...)``.
             rng: JAX random key.
             history_window: Number of past repo steps to consider for success history.
             policy_success_threshold: Minimum solve rate for an env to be a 'success'.
         """
-        super().__init__(config, unique_env_reset_states, rng)
+        super().__init__(config, train_env_reset_states, rng)
+        # Cache training-level pixel obs for fast history lookups.
         self.initial_pixel_obs = jax.vmap(
             lambda s: self.pixel_renderer(s.env_state)
-        )(self.unique_env_reset_states).image  # (E, 125, 125, 3)
+        )(self.train_env_reset_states).image  # (E, 125, 125, 3)
         self.history_window = history_window
         self.policy_success_threshold = policy_success_threshold
 
@@ -32,16 +35,19 @@ class PixelMatchingRepo(PolicyRepo):
 
     # ── Affinity computation ───────────────────────────────────────────────
 
-    def compute_affinity(self, candidate_env_indices: jax.Array) -> jax.Array:
+    def compute_affinity(self, env_reset_states) -> jax.Array:
         """Pixel-MSE-based affinity with column-wise softmax.
 
-        For first step (no history): uniform affinity.
-        Otherwise: each policy's raw score for an env is 1 / (min MSE to past
-        successful envs + ε).  Scores are then softmax-normalised per env column.
+        Candidate pixel obs are computed on-the-fly from ``env_reset_states``.
+        History lookups always use cached training-level pixel obs.
         """
         P = self.num_policies
-        E_subset = candidate_env_indices.shape[0]
-        pool_pixel_obs = self.initial_pixel_obs[candidate_env_indices]  # (E_subset, H, W, C)
+        E_subset = get_pytree_batch_size(env_reset_states)
+        # Pixel obs for the envs being scored — computed from whichever env set
+        # was passed (training candidates during advance, eval envs during evaluate).
+        pool_pixel_obs = jax.vmap(
+            lambda s: self.pixel_renderer(s.env_state)
+        )(env_reset_states).image
 
         if self._hist_envs is None or self._hist_envs.shape[1] == 0:
             # No history yet — uniform

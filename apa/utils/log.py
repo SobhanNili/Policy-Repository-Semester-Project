@@ -2,6 +2,23 @@ import math
 import numpy as np
 import matplotlib.pyplot as plt
 
+
+def frames_to_wandb_video(frames: np.ndarray) -> np.ndarray:
+    """Convert rollout frames to wandb.Video-compatible uint8 array.
+
+    Args:
+        frames: (T, H, W, C) float array, typically in [0, 1] or [0, 255].
+
+    Returns:
+        (T, C, H, W) uint8 array with vertical flip applied, ready for wandb.Video.
+    """
+    if frames.max() <= 1.0:
+        frames = frames * 255.0
+    vid = frames.transpose(0, 3, 2, 1)  # THWC → TCHW with width/height swap
+    vid = vid[:, :, ::-1, :]             # vertical flip
+    return vid.astype(np.uint8)
+
+
 def append_trajectory_metrics(traj_info, episode_history, num_copies_per_env=None):
     """Accumulate episode metrics from a PPO rollout into per-policy (and optionally per-env) lists.
 
