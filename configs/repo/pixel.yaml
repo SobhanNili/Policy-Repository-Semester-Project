@@ -1,6 +1,0 @@
-# PixelMatchingRepo — assigns policies to visually-similar environments using
-# pixel-space MSE distance to previously-solved environments' rendered frames.
-repo_type: pixel_matching
-
-history_window: 5             # number of past repo steps considered for success history
-policy_success_threshold: 0.5 # minimum solve rate for an environment to be marked as "success"
