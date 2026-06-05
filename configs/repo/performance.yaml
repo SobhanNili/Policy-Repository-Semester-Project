@@ -1,0 +1,15 @@
+# PerformanceMatchingRepo — assigns policies based on frozen-policy evaluation
+# rollouts.  Unlike proxy-based repos, this measures actual policy competence
+# on each environment.  Three scoring modes available.
+repo_type: performance_matching
+
+mode: rank                    # scoring strategy:
+                              #   "rank"        — rank policies per env by avg return (nonparametric)
+                              #   "solve_rate"  — fraction of episodes solved (coarse but interpretable)
+                              #   "hybrid"      — solve_rate dominant + small return-based tiebreaker
+policy_eval_ep_count: 3       # evaluation episodes per (policy, env) pair for affinity scoring
+                              #   each episode is capped at 256 steps (Kinetix truncation horizon)
+temperature: 1.0              # column-wise softmax temperature
+                              #   < 1 sharper (more decisive), > 1 flatter
+hybrid_return_weight: 0.1     # weight of return-based tiebreaker in "hybrid" mode
+                              #   ignored when mode != "hybrid"

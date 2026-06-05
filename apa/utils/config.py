@@ -4,7 +4,8 @@ from omegaconf import OmegaConf
 from pathlib import Path
 
 def normalise_config(config):
-    keys = ["env", "learning", "model", "misc", "eval", "ued", "env_size", "train_levels"]
+    keys = ["env", "learning", "model", "misc", "eval", "ued",
+            "env_size", "train_levels", "repo"]
     for k in keys:
         if k not in config:
             config[k] = {}
@@ -26,8 +27,19 @@ def normalise_config(config):
 
     return config
 
-def load_config(config_path: str, config_name: str):
+def load_config(config_path: str, config_name: str,
+                overrides: list[str] | None = None):
+    """Load and normalise a Hydra config.
+
+    Args:
+        config_path: path to the Hydra config directory.
+        config_name: name of the primary config file (without .yaml).
+        overrides: optional list of Hydra override strings (e.g. ["repo=dino", "sigma=0.5"]).
+
+    Returns:
+        Flattened dict with all config group keys promoted to top level.
+    """
     config_dir = Path(config_path).resolve()
     with initialize_config_dir(version_base=None, config_dir=str(config_dir)):
-        cfg = compose(config_name=config_name)
+        cfg = compose(config_name=config_name, overrides=overrides or [])
     return normalise_config(OmegaConf.to_container(cfg, resolve=True))

@@ -1,0 +1,58 @@
+# ── Hydra configuration ──────────────────────────────────────────────────────
+hydra:
+  searchpath:
+    # Compose kinetix config groups (env, model, learning, etc.) from the
+    # third-party directory.  Path is relative to the working directory
+    # (the project root when launched via ``python scripts/run.py``).
+    - file://third_party/kinetix/configs
+
+# ── Kinetix defaults (composed from third-party config groups) ───────────────
+defaults:
+  - env: entity                # observation & action types, reward scale, frame_skip
+  - env_size: l                # max polygons/circles/joints/thrusters per environment
+  - model:
+    - model-base               # fc_layer_depth, fc_layer_width, activation
+    - model-transformer        # transformer_depth, transformer_size, num_heads
+    - model-perm-invariant-mlp # symbolic_embedding_dim, encoder_size (compatibility)
+  - train_levels: train_all    # list of training levels; set to "random" for procedural
+  - eval: s                    # held-out evaluation level set
+  - learning:
+    - ppo-base                 # lr, gamma, clip_eps, gae_lambda, ent_coef, etc.
+    - ppo-rnn                  # num_steps, num_repeats (recurrent rollout config)
+  - repo: random               # policy repository type + hyperparameters (see repo/)
+  - _self_
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Repo-agnostic experiment settings
+# ══════════════════════════════════════════════════════════════════════════════
+
+seed: 0                       # JAX random seed for reproducibility
+
+# ── Environment batching ─────────────────────────────────────────────────────
+num_copies_per_env: 4         # parallel copies per distinct env;
+                              #   total batch per policy = candidate_pool_size × num_copies_per_env
+
+# ── Training budget ──────────────────────────────────────────────────────────
+num_updates: 200              # PPO update steps per repository iteration (inner loop)
+num_repo_updates: 10          # number of repository steps (outer loop over advance())
+
+# ── Repository structure ─────────────────────────────────────────────────────
+num_policies: 4               # fixed number of policy networks in the repository
+candidate_pool_size: 4        # distinct envs randomly sampled per repo step;
+                              #   must satisfy (candidate_pool_size × num_copies_per_env) % num_minibatches == 0
+
+# ── Evaluation ───────────────────────────────────────────────────────────────
+eval_rollout_steps: 512       # rollout steps for frozen-policy evaluation;
+                              #   environments auto-reset after 256 steps (Kinetix truncation)
+
+# ── Logging ───────────────────────────────────────────────────────────────────
+use_wandb: false              # set to true to log metrics & videos to Weights & Biases
+wandb_runname: "experiment"   # run name prefix shown in the wandb dashboard
+video_frequency: 1            # log evaluation videos every N repo steps (null = never)
+
+# Override kinetix defaults for the repository setting
+learning:
+  num_train_envs: 10          # total number of distinct training environments
+  num_minibatches: 2          # PPO minibatch subdivisions; num_train_envs must be divisible by this
+  update_epochs: 8            # number of epochs over the same trajectory per PPO update
+  num_steps: 64               # PPO rollout length (environment steps per trajectory segment)

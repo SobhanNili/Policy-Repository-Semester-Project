@@ -1,16 +1,22 @@
 #!/usr/bin/env python3
 """Experiment runner for PolicyRepo-based skill repository training.
 
+Reads experiment configuration from ``configs/config.yaml`` (Hydra), which
+composes kinetix config groups via ``hydra.searchpath``.  Repo-specific
+hyperparameters are defined in ``configs/repo/<type>.yaml``.
+
 Usage:
     python scripts/run.py --repo random
     python scripts/run.py --repo dino --sigma 0.3 --temperature 1.0
-    python scripts/run.py --repo performance --mode rank --policy_eval_ep_count 5
-    python scripts/run.py --repo morphology --history_decay 0.1 --sigma 0.15
+    python scripts/run.py --repo performance --mode rank
+
+Repos available: random, pixel, morphology, performance, dino.
+Use ``python scripts/run.py --repo <type> --help`` to see repo-specific options.
 
 Each run creates a timestamped output directory containing:
     - step_logs.pkl      : list of RepoStepLog namedtuples
-    - config.json         : resolved configuration dict
-    - repo_kwargs.json    : repo-specific kwargs used for this run
+    - config.json         : resolved configuration dict (from Hydra)
+    - repo_kwargs.json    : repo-specific constructor kwargs used for this run
     - plots/              : 5 diagnostic PNG plots
 """
 
@@ -50,44 +56,29 @@ from apa.repo import (  # noqa: E402
 )
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Repo registry: name → (class, dict of default kwargs)
-# Each entry maps CLI-friendly names to their class and the constructor kwargs
-# that can be overridden from the command line.
+# Repo registry: repo_type string → (class, list of constructor kwargs keys)
+#
+# The actual default values for each kwarg live in ``configs/repo/<type>.yaml``
+# and are resolved by Hydra at config-load time.  This registry only needs to
+# know which keys to extract from the flattened config dict and pass to the
+# repo constructor.
 # ──────────────────────────────────────────────────────────────────────────────
 
-REPO_REGISTRY: dict[str, tuple[type, dict[str, Any]]] = {
-    "random": (RandomMatchingRepo, {}),
-    "pixel": (
-        PixelMatchingRepo,
-        {"history_window": 5, "policy_success_threshold": 0.5},
-    ),
-    "morphology": (
-        MorphologyMatchingRepo,
-        {
-            "history_decay": 0.1,
-            "sigma": 0.15,
-            "temperature": 1.0,
-            "feature_weights": "(1.0, 1.0, 1.0, 1.0, 1.0, 1.0)",
-        },
-    ),
-    "performance": (
-        PerformanceMatchingRepo,
-        {
-            "mode": "rank",
-            "policy_eval_ep_count": 3,
-            "temperature": 1.0,
-            "hybrid_return_weight": 0.1,
-        },
-    ),
-    "dino": (
-        DinoMatchingRepo,
-        {
-            "model_name": "facebook/dinov3-vitb16-pretrain-lvd1689m",
-            "history_decay": 0.2,
-            "sigma": 0.3,
-            "temperature": 1.0,
-        },
-    ),
+REPO_REGISTRY: dict[str, tuple[type, list[str]]] = {
+    "random_matching":      (RandomMatchingRepo,      []),
+    "pixel_matching":       (PixelMatchingRepo,        ["history_window", "policy_success_threshold"]),
+    "morphology_matching":  (MorphologyMatchingRepo,   ["history_decay", "sigma", "temperature", "feature_weights"]),
+    "performance_matching": (PerformanceMatchingRepo,  ["mode", "policy_eval_ep_count", "temperature", "hybrid_return_weight"]),
+    "dino_matching":        (DinoMatchingRepo,         ["model_name", "history_decay", "sigma", "temperature"]),
+}
+
+# Short aliases for the CLI (--repo dino → repo_type = dino_matching)
+REPO_ALIASES: dict[str, str] = {
+    "random":      "random_matching",
+    "pixel":       "pixel_matching",
+    "morphology":  "morphology_matching",
+    "performance": "performance_matching",
+    "dino":        "dino_matching",
 }
 
 
@@ -96,122 +87,126 @@ REPO_REGISTRY: dict[str, tuple[type, dict[str, Any]]] = {
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-def _coerce_value(raw: str) -> Any:
-    """Attempt to parse a CLI string value into a Python literal.
+def parse_args(argv: list[str] | None = None) -> tuple[argparse.Namespace, list[str]]:
+    """Parse CLI arguments.
 
-    Tries JSON first (handles numbers, bools, lists), falls back to string.
+    Returns (args, hydra_overrides) where:
+        args             — parsed Namespace (repo, seed, output_dir)
+        hydra_overrides  — extra CLI args converted to Hydra override strings
+                           (e.g. ["sigma=0.3", "temperature=1.0"])
     """
-    if raw is None:
-        return None
-    try:
-        return json.loads(raw)
-    except (json.JSONDecodeError, TypeError):
-        return raw
-
-
-def _post_process_kwargs(repo_name: str, kwargs: dict[str, Any]) -> dict[str, Any]:
-    """Apply type-specific post-processing to parsed kwargs."""
-    if repo_name == "morphology" and "feature_weights" in kwargs:
-        fw = kwargs["feature_weights"]
-        if isinstance(fw, str):
-            # Strip parentheses and parse
-            fw = fw.strip("()")
-            kwargs["feature_weights"] = tuple(float(x.strip()) for x in fw.split(","))
-        elif isinstance(fw, list):
-            kwargs["feature_weights"] = tuple(float(x) for x in fw)
-    return kwargs
-
-
-def parse_args(argv: list[str] | None = None) -> tuple[argparse.Namespace, dict[str, Any]]:
-    """Parse CLI arguments, returning (shared_args, repo_kwargs).
-
-    Shared args: --repo, --seed, --config_name, --output_dir
-    Repo kwargs: dynamically parsed from registry for the selected repo type.
-    """
-    # First pass — just get the repo name
-    pre_parser = argparse.ArgumentParser(add_help=False)
-    pre_parser.add_argument("--repo", type=str, default=None)
-    pre_args, remaining = pre_parser.parse_known_args(argv)
-
-    if pre_args.repo is None:
-        pre_parser.error("--repo is required. Choices: " + ", ".join(REPO_REGISTRY))
-    if pre_args.repo not in REPO_REGISTRY:
-        pre_parser.error(
-            f"Unknown repo '{pre_args.repo}'. Choices: " + ", ".join(REPO_REGISTRY)
-        )
-
-    repo_name = pre_args.repo
-    _, known_keys = REPO_REGISTRY[repo_name]
-
-    # Build the main parser — note: ―repo is not required here since pre-parser
-    # already consumed it; we set it explicitly after parsing.
     parser = argparse.ArgumentParser(
         description="Run a PolicyRepo training experiment.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=_make_epilog(repo_name, known_keys),
+        epilog=_make_epilog(),
     )
     parser.add_argument(
-        "--repo",
-        default=repo_name,
-        choices=list(REPO_REGISTRY),
-        help="Repository type to run.",
-    )
-    parser.add_argument("--seed", type=int, default=0, help="Random seed (default: 0).")
-    parser.add_argument(
-        "--config_name",
-        default="naive_repo",
-        help="Hydra config name (default: naive_repo).",
+        "--repo", required=True,
+        choices=list(REPO_ALIASES),
+        help="Repository type (short alias).",
     )
     parser.add_argument(
-        "--output_dir",
-        default="outputs",
+        "--seed", type=int, default=None,
+        help="Random seed (default: from config).",
+    )
+    parser.add_argument(
+        "--output_dir", default="outputs",
         help="Parent directory for run outputs (default: outputs).",
     )
+    # --config_name is hidden; most users should use the default config.yaml
+    parser.add_argument(
+        "--config_name", default="config",
+        help=argparse.SUPPRESS,
+    )
 
-    # Dynamically add repo-specific kwargs
-    for key, default_val in known_keys.items():
-        parser.add_argument(
-            f"--{key}",
-            type=str,
-            default=None,
-            help=f"Default: {default_val}",
-        )
+    args, remaining = parser.parse_known_args(argv)
 
-    args = parser.parse_args(remaining)
-    # Ensure repo is set (in case it wasn't in remaining)
-    args.repo = repo_name
+    # Convert remaining --key value pairs to Hydra override format "key=value"
+    hydra_overrides = _remaining_to_hydra_overrides(remaining)
 
-    # Build repo kwargs: defaults overridden by CLI
-    repo_kwargs: dict[str, Any] = dict(known_keys)  # start with defaults
-    for key in known_keys:
-        cli_val = getattr(args, key, None)
-        if cli_val is not None:
-            repo_kwargs[key] = _coerce_value(cli_val)
-
-    repo_kwargs = _post_process_kwargs(repo_name, repo_kwargs)
-
-    return args, repo_kwargs
+    return args, hydra_overrides
 
 
-def _make_epilog(repo_name: str, known_keys: dict[str, Any]) -> str:
-    """Build help epilogue showing repo-specific options."""
-    lines = [f"\nRepo-specific options for '{repo_name}':"]
-    if not known_keys:
-        lines.append("  (none)")
-    else:
-        for k, v in known_keys.items():
-            lines.append(f"  --{k}  (default: {v})")
-    lines.append("\nExample:")
-    parts = [f"python scripts/run.py --repo {repo_name}"]
-    for k, v in list(known_keys.items())[:3]:
-        parts.append(f"--{k} {v}")
-    lines.append("  " + " ".join(parts))
+def _remaining_to_hydra_overrides(remaining: list[str]) -> list[str]:
+    """Convert ``--key value`` pairs to Hydra ``key=value`` overrides.
+
+    Supports:
+      --key value   → key=value
+      --key         → key=true        (boolean flag, no following value)
+
+    Keys that match a known repo kwarg are automatically prefixed with
+    ``repo.`` so Hydra applies them to the correct config group
+    (e.g. ``--sigma 0.3`` → ``repo.sigma=0.3``).
+    """
+    # Build a set of all known repo kwargs keys
+    _known_repo_keys: set[str] = set()
+    for _cls, keys in REPO_REGISTRY.values():
+        _known_repo_keys.update(keys)
+
+    overrides: list[str] = []
+    i = 0
+    while i < len(remaining):
+        arg = remaining[i]
+        if arg.startswith("--"):
+            key = arg[2:]  # strip leading --
+            if i + 1 < len(remaining) and not remaining[i + 1].startswith("--"):
+                val = remaining[i + 1]
+                i += 2
+            else:
+                val = "true"
+                i += 1
+            # Prefix repo-specific keys so Hydra finds them
+            qualified_key = f"repo.{key}" if key in _known_repo_keys else key
+            overrides.append(f"{qualified_key}={val}")
+        else:
+            i += 1
+    return overrides
+
+
+def _make_epilog() -> str:
+    """Build help epilogue with available repos and examples."""
+    lines = [
+        "\nAvailable repos:",
+    ]
+    for alias, full in REPO_ALIASES.items():
+        _, kwargs_keys = REPO_REGISTRY[full]
+        keys_str = ", ".join(f"--{k}" for k in kwargs_keys) if kwargs_keys else "(no extra options)"
+        lines.append(f"  {alias:<14} → {full:<24}  {keys_str}")
+
+    lines += [
+        "",
+        "Examples:",
+        "  python scripts/run.py --repo random",
+        "  python scripts/run.py --repo dino --sigma 0.3 --temperature 1.0",
+        "  python scripts/run.py --repo performance --mode rank",
+        "",
+        "Any config key can be overridden via the command line:",
+        "  python scripts/run.py --repo dino --seed 42 --num_repo_updates 20",
+    ]
     return "\n".join(lines)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Environment setup (mirrors notebook)
 # ──────────────────────────────────────────────────────────────────────────────
+
+
+def _extract_repo_kwargs(config: dict, kwargs_keys: list[str],
+                         repo_type: str) -> dict[str, Any]:
+    """Pull repo constructor kwargs from the flattened config dict.
+
+    Applies any necessary type conversions (e.g. feature_weights list → tuple).
+    """
+    kwargs = {k: config[k] for k in kwargs_keys if k in config}
+    # MorphologyMatchingRepo expects feature_weights as a tuple of floats
+    if repo_type == "morphology_matching" and "feature_weights" in kwargs:
+        fw = kwargs["feature_weights"]
+        if isinstance(fw, list):
+            kwargs["feature_weights"] = tuple(float(x) for x in fw)
+        elif isinstance(fw, str):
+            fw = fw.strip("()")
+            kwargs["feature_weights"] = tuple(float(x.strip()) for x in fw.split(","))
+    return kwargs
 
 
 def setup_environments(config: dict, rng: jax.Array):
@@ -510,23 +505,36 @@ def _sanitize_config(config: dict) -> dict:
 
 
 def main(argv: list[str] | None = None) -> None:
-    args, repo_kwargs = parse_args(argv)
+    args, hydra_overrides = parse_args(argv)
+
+    # Resolve full repo_type from CLI alias
+    repo_type = REPO_ALIASES[args.repo]
 
     # ── Resolve config path relative to this script ─────────────────────────
     script_dir = Path(__file__).resolve().parent
-    config_dir = script_dir.parent / "third_party" / "kinetix" / "configs"
+    config_dir = script_dir.parent / "configs"
     if not config_dir.exists():
         print(f"ERROR: Config directory not found: {config_dir}", file=sys.stderr)
         sys.exit(1)
 
-    # ── Load and normalise config ───────────────────────────────────────────
-    config = load_config(str(config_dir), args.config_name)
-    config["seed"] = args.seed
+    # Build Hydra overrides: repo selection + any CLI key=value pairs
+    overrides = [f"repo={args.repo}"] + hydra_overrides
+
+    # ── Load and normalise config (Hydra resolves defaults + overrides) ─────
+    config = load_config(str(config_dir), args.config_name, overrides=overrides)
+    if args.seed is not None:
+        config["seed"] = args.seed
     print(f"Loaded config '{args.config_name}' from {config_dir}")
+    print(f"  Repo: {repo_type}")
+
+    # ── Extract repo-specific kwargs from flattened config ──────────────────
+    repo_cls, kwargs_keys = REPO_REGISTRY[repo_type]
+    repo_kwargs = _extract_repo_kwargs(config, kwargs_keys, repo_type)
+    print(f"  Repo kwargs: {repo_kwargs}")
 
     # ── Output directory ────────────────────────────────────────────────────
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    run_dir = Path(args.output_dir) / f"{args.repo}_{timestamp}"
+    run_dir = Path(args.output_dir) / f"{repo_type}_{timestamp}"
     run_dir.mkdir(parents=True, exist_ok=False)
     print(f"Output directory: {run_dir}")
 
@@ -545,8 +553,7 @@ def main(argv: list[str] | None = None) -> None:
     )
 
     # ── Repo initialization ─────────────────────────────────────────────────
-    repo_cls, _ = REPO_REGISTRY[args.repo]
-    print(f"Initializing {args.repo} repo with kwargs: {repo_kwargs}")
+    print(f"Initializing {repo_type} repo with kwargs: {repo_kwargs}")
     policy_repo = repo_cls(config, train_env_reset_states, rng, **repo_kwargs)
 
     # ── Training loop ───────────────────────────────────────────────────────
