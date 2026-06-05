@@ -1,0 +1,43 @@
+# ── Hydra configuration ──────────────────────────────────────────────────────
+hydra:
+  searchpath:
+    # Compose kinetix config groups (env, model, learning, etc.) from the
+    # third-party directory.  Path is relative to the working directory
+    # (the project root when launched via ``python scripts/train_ppo.py``).
+    - file://third_party/kinetix/configs
+
+# ── Kinetix defaults (composed from third-party config groups) ───────────────
+defaults:
+  - env: entity                # observation & action types, reward scale, frame_skip
+  - env_size: l                # max polygons / circles / joints / thrusters
+  - model:
+    - model-base               # fc_layer_depth, fc_layer_width, activation
+    - model-transformer        # transformer_depth, transformer_size, num_heads
+    - model-perm-invariant-mlp # symbolic_embedding_dim, encoder_size
+  - train_levels: random    # list of hand-authored training levels
+  - eval: s                    # held-out evaluation level set (small)
+  - learning:
+    - ppo-base                 # lr, gamma, clip_eps, gae_lambda, ent_coef, etc.
+    - ppo-rnn                  # num_steps (recurrent rollout length)
+  - misc: misc                 # save_path, video_frequency, wandb settings, etc.
+  - _self_
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Overrides (take precedence over the composed defaults above)
+# ══════════════════════════════════════════════════════════════════════════════
+
+seed: 0
+
+# ── Checkpoint path & logging (override misc.yaml defaults) ──────────────────
+misc:
+  save_path: checkpoints/ppo_training
+  use_wandb: true
+  video_frequency: 2
+  wandb_project: Kinetix
+
+# ── Evaluation frequency ─────────────────────────────────────────────────────
+eval:
+  eval_freq: 64
+
+learning:
+  total_timesteps: 1073741824 #1073741824
