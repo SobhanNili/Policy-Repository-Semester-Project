@@ -34,7 +34,7 @@ class DinoMatchingRepo(PolicyRepo):
         train_env_reset_states,
         rng,
         model_name: str = "facebook/dinov3-vitb16-pretrain-lvd1689m", # "facebook/dinov2-base"
-        history_decay: float = 0.2,
+        history_decay: float = 0.1,
         sigma: float = 0.3,
         temperature: float = 1.0,
     ) -> None:
@@ -46,7 +46,7 @@ class DinoMatchingRepo(PolicyRepo):
                 ``"facebook/dinov2-base"`` (768-dim embeddings).
             history_decay: Exponential decay rate for past-step weighting.
                 ``0`` = all history equally weighted forever;
-                ``1`` = very fast forgetting.  Default ``0.2``.
+                ``1`` = very fast forgetting.  Default ``0.1``.
             sigma: RBF kernel bandwidth for L2 distance on unit vectors.
                 L2 distance ranges [0, 2] for normalized vectors.
                 Default ``0.3`` gives good discrimination.

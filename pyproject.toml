@@ -9,6 +9,7 @@ description = "Adaptive policy reuse in jax. Semester Project @ A.Mathis Lab, EP
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+    "huggingface-hub>=1.15.0",
     "ipykernel>=7.2.0",
     "ipywidgets>=8.1.8",
     "jax[cuda12]>=0.6.2",

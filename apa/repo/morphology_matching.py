@@ -27,7 +27,7 @@ class MorphologyMatchingRepo(PolicyRepo):
         config,
         train_env_reset_states,
         rng,
-        history_decay: float = 0.2,
+        history_decay: float = 0.1,
         sigma: float = 0.15,
         temperature: float = 1.0,
         feature_weights: tuple[float, ...] = (1.0, 1.0, 1.0, 1.0, 1.0, 1.0),
