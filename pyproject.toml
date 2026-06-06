@@ -25,4 +25,4 @@ kinetix-env = { path = "third_party/kinetix", editable = true }
 
 [tool.setuptools.packages.find]
 include = ["apa*"]
-exclude = ["checkpoints*", "logs*", "wandb*", "third_party*"]
+exclude = ["checkpoints*", "logs*", "wandb*", "third_party*", "configs*", "scripts*"]
