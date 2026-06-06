@@ -14,7 +14,7 @@ defaults:
     - model-base               # fc_layer_depth, fc_layer_width, activation
     - model-transformer        # transformer_depth, transformer_size, num_heads
     - model-perm-invariant-mlp # symbolic_embedding_dim, encoder_size
-  - train_levels: random    # list of hand-authored training levels
+  - train_levels: train_all    # list of training levels, or random
   - eval: s                    # held-out evaluation level set (small)
   - learning:
     - ppo-base                 # lr, gamma, clip_eps, gae_lambda, ent_coef, etc.
