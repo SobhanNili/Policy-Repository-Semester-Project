@@ -50,7 +50,7 @@ from apa.utils.env import (  # noqa: E402
 from apa.repo import (  # noqa: E402
     DinoMatchingRepo,
     MorphologyMatchingRepo,
-    NetworkEmbeddingMatchingRepo,
+    PolicyLatentMatchingRepo,
     PerformanceMatchingRepo,
     RandomMatchingRepo,
 )
@@ -69,7 +69,7 @@ REPO_REGISTRY: dict[str, tuple[type, list[str]]] = {
     "morphology_matching":  (MorphologyMatchingRepo,   ["history_decay", "sigma", "feature_weights"]),
     "performance_matching": (PerformanceMatchingRepo,  ["mode", "policy_eval_ep_count", "hybrid_return_weight"]),
     "dino_matching":        (DinoMatchingRepo,         ["model_name", "history_decay", "sigma"]),
-    "network_embedding_matching": (NetworkEmbeddingMatchingRepo, ["checkpoint_path", "history_decay", "sigma"]),
+    "network_embedding_matching": (PolicyLatentMatchingRepo, ["checkpoint_path", "history_decay", "sigma"]),
 }
 
 # Short aliases for the CLI (--repo dino → repo_type = dino_matching)
