@@ -212,7 +212,7 @@ def _extract_repo_kwargs(config: dict, kwargs_keys: list[str],
 
 
 def setup_environments(config: dict, rng: jax.Array):
-    """Create training (and optionally eval) environments from config.
+    """Create training and evaluation environments from config.
 
     Returns (env, env_params, static_env_params, train_env_reset_states, rng).
     Mutates config["num_train_envs"] when loading from level lists.
@@ -231,7 +231,9 @@ def setup_environments(config: dict, rng: jax.Array):
         )
         config["num_train_envs"] = len(config["train_levels_list"])
 
-    return env, env_params, static_env_params, train_env_reset_states, rng
+    eval_env_reset_states = load_levels(config["eval_levels"], static_env_params_override=static_env_params)
+
+    return env, env_params, static_env_params, train_env_reset_states, eval_env_reset_states, rng
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -323,7 +325,7 @@ def main(argv: list[str] | None = None) -> None:
     print(f"JAX devices: {jax.devices()}")
 
     # ── Environment creation ────────────────────────────────────────────────
-    _, _, _, train_env_reset_states, rng = setup_environments(config, rng)
+    _, _, _, train_env_reset_states, eval_env_reset_states, rng = setup_environments(config, rng)
     print(
         f"Created {config['num_train_envs']} training environments "
         f"(mode: {config['train_level_mode']})"
