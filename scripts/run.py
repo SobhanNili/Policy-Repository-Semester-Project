@@ -50,8 +50,8 @@ from apa.utils.env import (  # noqa: E402
 from apa.repo import (  # noqa: E402
     DinoMatchingRepo,
     MorphologyMatchingRepo,
+    NetworkEmbeddingMatchingRepo,
     PerformanceMatchingRepo,
-    PixelMatchingRepo,
     RandomMatchingRepo,
 )
 
@@ -66,19 +66,19 @@ from apa.repo import (  # noqa: E402
 
 REPO_REGISTRY: dict[str, tuple[type, list[str]]] = {
     "random_matching":      (RandomMatchingRepo,      []),
-    "pixel_matching":       (PixelMatchingRepo,        ["history_window", "policy_success_threshold"]),
-    "morphology_matching":  (MorphologyMatchingRepo,   ["history_decay", "sigma", "temperature", "feature_weights"]),
-    "performance_matching": (PerformanceMatchingRepo,  ["mode", "policy_eval_ep_count", "temperature", "hybrid_return_weight"]),
-    "dino_matching":        (DinoMatchingRepo,         ["model_name", "history_decay", "sigma", "temperature"]),
+    "morphology_matching":  (MorphologyMatchingRepo,   ["history_decay", "sigma", "feature_weights"]),
+    "performance_matching": (PerformanceMatchingRepo,  ["mode", "policy_eval_ep_count", "hybrid_return_weight"]),
+    "dino_matching":        (DinoMatchingRepo,         ["model_name", "history_decay", "sigma"]),
+    "network_embedding_matching": (NetworkEmbeddingMatchingRepo, ["checkpoint_path", "history_decay", "sigma"]),
 }
 
 # Short aliases for the CLI (--repo dino → repo_type = dino_matching)
 REPO_ALIASES: dict[str, str] = {
     "random":      "random_matching",
-    "pixel":       "pixel_matching",
     "morphology":  "morphology_matching",
     "performance": "performance_matching",
     "dino":        "dino_matching",
+    "network":     "network_embedding_matching",
 }
 
 
@@ -298,10 +298,12 @@ def generate_plots(step_logs: list, output_dir: Path) -> None:
                     np.where(active, avg_returns[t, p], np.nan)
                 )
 
-    EPS = 1e-12
-    env_entropies = -np.sum(affinities * np.log(affinities + EPS), axis=1)  # (T, E)
-    mean_env_entropy = env_entropies.mean(axis=1)
-    std_env_entropy = env_entropies.std(axis=1)
+    # ── Utility margin: per-env gap between best and second-best raw score ──
+    # Sorted along policy axis: best (index -1), second-best (index -2)
+    sorted_aff = np.sort(affinities, axis=1)  # (T, P, E) — ascending
+    per_env_margins = sorted_aff[:, -1, :] - sorted_aff[:, -2, :]  # (T, E)
+    mean_margin = per_env_margins.mean(axis=1)
+    std_margin = per_env_margins.std(axis=1)
 
     # Spearman correlation
     from scipy.stats import spearmanr
@@ -378,33 +380,26 @@ def generate_plots(step_logs: list, output_dir: Path) -> None:
     fig.savefig(plots_dir / "plot_2_active_envs.png", dpi=150, bbox_inches="tight")
     plt.close(fig)
 
-    # ── Plot 3: Mean Per-Environment Entropy ────────────────────────────────
+    # ── Plot 3: Assignment Decisiveness (Utility Margin) ────────────────────
     fig, ax = plt.subplots(1, 1, figsize=(10, 4))
 
-    max_entropy = np.log(P)
-    ax.plot(steps, mean_env_entropy, color="tab:blue", lw=2, label="Mean entropy")
+    ax.plot(steps, mean_margin, color="tab:blue", lw=2, label="Mean margin")
     ax.fill_between(
         steps,
-        mean_env_entropy - std_env_entropy,
-        mean_env_entropy + std_env_entropy,
+        mean_margin - std_margin,
+        mean_margin + std_margin,
         alpha=0.2,
         color="tab:blue",
         label="±1 std",
     )
-    ax.axhline(
-        max_entropy,
-        color="gray",
-        ls="--",
-        lw=1,
-        label=f"Max (log P = {max_entropy:.2f})",
-    )
+    ax.axhline(0, color="gray", ls="--", lw=1, label="Zero margin (ties)")
     ax.set_xlabel("Repo Step")
-    ax.set_ylabel("Mean Per-Env Entropy")
-    ax.set_title("Assignment Ambiguity Over Training")
+    ax.set_ylabel("Mean Utility Margin")
+    ax.set_title("Assignment Decisiveness Over Training")
     ax.legend(loc="upper right")
 
     plt.tight_layout()
-    fig.savefig(plots_dir / "plot_3_entropy.png", dpi=150, bbox_inches="tight")
+    fig.savefig(plots_dir / "plot_3_margin.png", dpi=150, bbox_inches="tight")
     plt.close(fig)
 
     # ── Plot 4: Solve Rate by Affinity Quantile ─────────────────────────────

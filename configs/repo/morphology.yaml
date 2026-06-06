@@ -9,8 +9,6 @@ history_decay: 0.1            # exponential decay rate for past-step weighting
                               #   1 = very fast forgetting
 sigma: 0.15                   # RBF kernel bandwidth in normalised L2 feature space
                               #   smaller values require closer component-count match
-temperature: 1.0              # column-wise softmax temperature
-                              #   < 1 sharper (more decisive), > 1 flatter
 feature_weights: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
                               # per-feature multipliers applied before distance:
                               #   [polygons, circles, joints, thrusters, green_shapes, blue_shapes]

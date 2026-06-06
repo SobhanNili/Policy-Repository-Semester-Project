@@ -377,46 +377,81 @@ class PolicyRepo(ABC):
 
         @abstractmethod
         def compute_affinity(self, env_reset_states) -> jax.Array:
-            """Computes softmax-normalised affinity scores across policies.
+            """Computes raw affinity (utility) scores across policies.
+
+            Higher scores indicate a better match between a policy and an
+            environment.  Scores are NOT required to be normalised — the
+            assignment layer (``derive_assignment_mask``) handles any
+            needed normalisation internally.
+
+            Subclasses should return values in a consistent range where
+            possible (ideally [0, 1]), but this is not enforced.
 
             Args:
                 env_reset_states: pytree of environment reset states to score.
 
             Returns:
-                (P, n) float array where n = get_pytree_batch_size(env_reset_states),
-                and for each env e: sum_p affinity[p, e] == 1.0 (column-wise softmax).
+                (P, n) float array where n = get_pytree_batch_size(env_reset_states).
+                No column-sum constraint.
             """
             pass
 
-        def derive_assignment_mask(self, affinity: jax.Array) -> jax.Array:
-            """Derives (E_subset, P) binary active mask by sampling from affinity.
+        def derive_assignment_mask(self, raw_scores: jax.Array) -> jax.Array:
+            """Derives (E_subset, P) binary active mask from raw affinity scores.
 
-            Each column ``affinity[:, e]`` sums to 1, so it is a valid categorical
-            distribution.  We sample one policy per env from that distribution.
-            Two safety nets are applied afterwards:
+            Supports three assignment modes controlled by ``config["assignment_mode"]``:
 
+            - ``"greedy"`` (default): argmax — each env goes to its highest-scoring
+              policy.  Deterministic; no hyperparameters.
+            - ``"softmax"``: column-wise softmax with temperature
+              ``config["assignment_temperature"]``, then categorical sampling.
+            - ``"epsilon_greedy"``: argmax with probability 1 − ε, random uniform
+              with probability ε (``config["assignment_epsilon"]``).
+
+            Two safety nets are always applied afterwards:
             1. Every **policy** gets at least one active env.
             2. Every **env** gets assigned to at least one policy.
-
-            Override for deterministic (argmax) or more sophisticated assignment
-            (e.g. threshold, Hungarian, auction).
             """
-            E_subset = affinity.shape[1]
-            self.rng, sub_rng = jr.split(self.rng)
-            assignments = jax.random.categorical(sub_rng, jnp.log(affinity + 1e-12), axis=0)
+            mode = self.config.get("assignment_mode", "greedy")
+            E_subset = raw_scores.shape[1]
+            self.rng, *sub_rngs = jr.split(self.rng, 4)
+
+            if mode == "greedy":
+                assignments = jnp.argmax(raw_scores, axis=0)
+
+            elif mode == "softmax":
+                tau = self.config.get("assignment_temperature", 0.1)
+                probs = jax.nn.softmax(raw_scores / tau, axis=0)
+                assignments = jax.random.categorical(
+                    sub_rngs[0], jnp.log(probs + 1e-12), axis=0
+                )
+
+            elif mode == "epsilon_greedy":
+                eps = self.config.get("assignment_epsilon", 0.1)
+                greedy = jnp.argmax(raw_scores, axis=0)
+                random_ = jr.randint(sub_rngs[0], (E_subset,), 0, self.num_policies)
+                use_random = jr.uniform(sub_rngs[1], (E_subset,)) < eps
+                assignments = jnp.where(use_random, random_, greedy)
+
+            else:
+                raise ValueError(
+                    f"Unknown assignment_mode '{mode}'; "
+                    f"expected 'greedy', 'softmax', or 'epsilon_greedy'"
+                )
+
             mask = jnp.zeros((E_subset, self.num_policies), dtype=bool)
             mask = mask.at[jnp.arange(E_subset), assignments].set(True)
 
             # Safety net 1: every policy gets at least one active env
             for p in range(self.num_policies):
                 if not mask[:, p].any():
-                    best_env = jnp.argmax(affinity[p, :])
+                    best_env = jnp.argmax(raw_scores[p, :])
                     mask = mask.at[best_env, p].set(True)
 
             # Safety net 2: every env gets assigned to at least one policy
             for e in range(E_subset):
                 if not mask[e, :].any():
-                    best_policy = jnp.argmax(affinity[:, e])
+                    best_policy = jnp.argmax(raw_scores[:, e])
                     mask = mask.at[e, best_policy].set(True)
 
             return mask

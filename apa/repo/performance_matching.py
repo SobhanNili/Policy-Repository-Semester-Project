@@ -40,7 +40,6 @@ class PerformanceMatchingRepo(PolicyRepo):
         rng,
         mode: str = "rank",
         policy_eval_ep_count: int = 3,
-        temperature: float = 1.0,
         hybrid_return_weight: float = 0.1,
     ) -> None:
         """Args:
@@ -52,8 +51,6 @@ class PerformanceMatchingRepo(PolicyRepo):
             policy_eval_ep_count: Number of episodes per (policy, env) pair
                 for the affinity evaluation rollout.  Each episode is
                 pessimistically 256 steps (the Kinetix truncation horizon).
-            temperature: Softmax temperature.  ``1.0`` = standard softmax;
-                ``< 1`` sharper, ``> 1`` flatter.  Shared across all modes.
             hybrid_return_weight: Weight of the return-based tiebreaker in
                 ``"hybrid"`` mode.  Ignored in other modes.  The return term
                 is bounded to ``[0, hybrid_return_weight]`` per column, so
@@ -65,7 +62,6 @@ class PerformanceMatchingRepo(PolicyRepo):
                 f"Unknown mode '{mode}'; expected 'rank', 'solve_rate', or 'hybrid'"
             )
         self.mode = mode
-        self.temperature = temperature
         self.hybrid_return_weight = hybrid_return_weight
 
         # Each episode is capped at 256 steps (Kinetix truncation horizon).
@@ -75,14 +71,15 @@ class PerformanceMatchingRepo(PolicyRepo):
     # ── Affinity computation ───────────────────────────────────────────────
 
     def compute_affinity(self, env_reset_states) -> jax.Array:
-        """Run eval rollouts on all (policy × candidate env) pairs and derive
-        column-wise softmax affinity.
+        """Run eval rollouts on all (policy × candidate env) pairs and return
+        raw affinity scores.
 
         Args:
             env_reset_states: pytree of environment reset states to score.
 
         Returns:
-            ``(P, E_subset)`` float array; each column sums to 1.
+            ``(P, E_subset)`` float array of raw scores (higher = better match).
+            Values are normalised to [0, 1] where possible.
         """
         P = self.num_policies
         E_subset = get_pytree_batch_size(env_reset_states)
@@ -98,22 +95,18 @@ class PerformanceMatchingRepo(PolicyRepo):
         avg_return = results[:, :, 1]   # (P, E_subset) — may be negative
 
         if self.mode == "rank":
-            # Best policy gets rank 1, worst gets rank P.
-            # argsort(argsort(-x)) gives ranks 0..P-1 (0 = best).
-            ranks = (
-                jnp.argsort(jnp.argsort(-avg_return, axis=0), axis=0)
-                .astype(jnp.float32)
-                + 1
-            )  # (P, E_subset), 1-indexed
-            raw = -ranks  # better rank → less negative → higher softmax
+            # Best policy gets rank 0, worst gets rank P-1.
+            # Normalise to [0, 1]: (P-1 - rank) / (P-1)
+            #   P=4 → ranks [0,1,2,3] → scores [1.0, 0.67, 0.33, 0.0]
+            ranks = jnp.argsort(jnp.argsort(-avg_return, axis=0), axis=0).astype(jnp.float32)
+            raw = (P - 1 - ranks) / (P - 1)
 
         elif self.mode == "solve_rate":
-            raw = solve_rate  # coarse but directly meaningful
+            raw = solve_rate  # already in [0, 1]
 
         elif self.mode == "hybrid":
             # Solve rate dominates; softmax of returns breaks ties.
-            # Softmax is shift-invariant → handles negative returns cleanly.
             return_softmax = jax.nn.softmax(avg_return, axis=0)  # (P, E_subset)
             raw = solve_rate + self.hybrid_return_weight * return_softmax
 
-        return jax.nn.softmax(raw / self.temperature, axis=0)
+        return raw

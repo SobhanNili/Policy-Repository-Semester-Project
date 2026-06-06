@@ -12,5 +12,3 @@ history_decay: 0.2            # exponential decay rate for past-step weighting
                               #   1 = very fast forgetting
 sigma: 0.3                    # RBF kernel bandwidth on L2 distance between L2-normalized embeddings
                               #   embedding L2 range is [0, 2]; 0.3 gives good discrimination
-temperature: 1.0              # column-wise softmax temperature
-                              #   < 1 sharper (more decisive), > 1 flatter

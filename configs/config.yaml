@@ -45,6 +45,11 @@ candidate_pool_size: 4        # distinct envs randomly sampled per repo step;
 eval_rollout_steps: 512       # rollout steps for frozen-policy evaluation;
                               #   environments auto-reset after 256 steps (Kinetix truncation)
 
+# ── Assignment ───────────────────────────────────────────────────────────────
+assignment_mode: greedy       # "greedy" (argmax), "softmax", or "epsilon_greedy"
+assignment_temperature: 0.1   # softmax temperature (only used when mode = softmax)
+assignment_epsilon: 0.1       # exploration probability (only used when mode = epsilon_greedy)
+
 # ── Logging ───────────────────────────────────────────────────────────────────
 use_wandb: false              # set to true to log metrics & videos to Weights & Biases
 wandb_runname: "experiment"   # run name prefix shown in the wandb dashboard
