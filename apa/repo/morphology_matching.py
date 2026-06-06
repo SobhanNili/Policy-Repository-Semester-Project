@@ -29,7 +29,6 @@ class MorphologyMatchingRepo(PolicyRepo):
         rng,
         history_decay: float = 0.1,
         sigma: float = 0.15,
-        temperature: float = 1.0,
         feature_weights: tuple[float, ...] = (1.0, 1.0, 1.0, 1.0, 1.0, 1.0),
     ) -> None:
         """Repository that matches policies to structurally similar environments.
@@ -46,8 +45,6 @@ class MorphologyMatchingRepo(PolicyRepo):
             sigma: RBF kernel bandwidth in *normalised* L2 space.
                 Smaller values require closer component-count match.
                 Default ``0.15`` (suitable when envs differ by 1–2 components).
-            temperature: Softmax temperature.  ``1.0`` = standard softmax;
-                ``< 1`` sharper, ``> 1`` flatter.  Default ``1.0``.
             feature_weights: Per-feature multipliers applied before distance
                 computation.  Length-6 tuple for ``[polygons, circles, joints,
                 thrusters, green_shapes, blue_shapes]``.  Default all ones.
@@ -84,7 +81,6 @@ class MorphologyMatchingRepo(PolicyRepo):
         # ── Hyper-parameters ──────────────────────────────────────────────
         self.history_decay = history_decay
         self.sigma = sigma
-        self.temperature = temperature
 
         # ── Flat history arrays (P, total_entries) for jitted scoring ────
         self._hist_envs: Optional[jnp.ndarray] = None  # (P, H) — env indices
@@ -138,9 +134,7 @@ class MorphologyMatchingRepo(PolicyRepo):
             self._hist_envs, self._hist_perf, self._hist_ages
         )  # (P, E_subset)
 
-        # Column-wise temperature-scaled softmax
-        affinity = jax.nn.softmax(raw_scores / self.temperature, axis=0)
-        return affinity
+        return raw_scores
 
     # ── History maintenance ─────────────────────────────────────────────────
 
