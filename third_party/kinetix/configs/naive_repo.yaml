@@ -5,7 +5,8 @@ defaults:
     - model-base
     - model-transformer
     - model-perm-invariant-mlp # for compatibility
-  - train_levels: s # or random
+  - train_levels: train_all # or random
+  - eval: s
   - learning:
     - ppo-base
     - ppo-rnn
@@ -13,18 +14,20 @@ defaults:
 
 seed: 0
 learning:
-  num_train_envs: 50 # number of distinct envs
-  num_minibatches: 5 # division of vectorized envs to smaller batches. Number of envs should be divisable by this
+  num_train_envs: 10 # number of distinct envs
+  num_minibatches: 2 # division of vectorized envs to smaller batches. Number of envs should be divisable by this
   update_epochs: 8 # the number of times to iterate over the same trajectory. Default: 8
   num_steps: 64 # PPO roleout length (how many steps in the trajectory)
 
-num_copies_per_env: 5 # batch size for same env type. A policy network sees this many vecotrizes anvs at once.
-num_updates: 100 # how many ppo updates to do on each env duing one repo iteration
-num_repo_updates: 20 # how many skill repo updates
+num_copies_per_env: 4 # batch size for same env type. A policy network sees this many vecotrizes anvs at once.
+num_updates: 200 # how many ppo updates to do on each env duing one repo iteration
+num_repo_updates: 10 # how many skill repo updates
 
-num_policies: 5 # fixed number of policies for now
+num_policies: 4 # fixed number of policies for now
+
+candidate_pool_size: 4 # number of distinct envs randomly sampled as candidates per repo step. All policies share this same candidate set. Total batch per policy = candidate_pool_size * num_copies_per_env. Must have candidate_pool_size * num_copies_per_env divisible by num_minibatches.
+eval_rollout_steps: 512 # rollout steps for post-training frozen-policy evaluation. NOTE: each env automatically resets after 256 steps
 
 use_wandb: false
 wandb_runname: 'EVAL-matching-M-env'
 video_frequency: 1
-# NOTE: each env automatically resets after 256 steps

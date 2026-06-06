@@ -24,50 +24,47 @@ def make_env_from_config(config):
 
     return env, env_params, static_env_params
 
-def get_random_envs(indep_envs_count, envs_in_batch, env, env_params, rng):
-    # One RNG per distinct env
-    group_reset_rngs = jr.split(rng, indep_envs_count) # (indep_envs_count,) shared reset rng for each group of envs
+def get_random_envs(num_envs: int, env, env_params, rng):
+    """Generate random environment initial states (single copies).
 
-    # Replicate within each group
-    env_reset_rngs = jnp.repeat(group_reset_rngs[:, None, :], envs_in_batch, axis=1)   # (indep_envs_count, envs_in_batch), where the rng is the same within a group
+    Creates ``num_envs`` unique random environments, each with its own RNG key.
+    Returns only single copies — use ``duplicate_env_states`` if replication is needed.
 
-    obs0, fixed_reset_states = jax.vmap(
-        jax.vmap(env.reset, in_axes=(0, None)),
-        in_axes=(0, None),
-    )(env_reset_rngs, env_params)
+    Args:
+        num_envs: Number of distinct random environments to create.
+        env: The environment object (with a ``reset`` method).
+        env_params: Environment parameters passed to ``env.reset``.
+        rng: JAX PRNG key.
 
+    Returns:
+        A pytree of ``LogEnvState`` with leading shape ``(num_envs, ...)``.
+    """
+    reset_rngs = jr.split(rng, num_envs)
+    obs0, fixed_reset_states = jax.vmap(env.reset, in_axes=(0, None))(reset_rngs, env_params)
     return fixed_reset_states
 
-def load_and_replicate_levels(
+
+def load_levels(
     level_names: list[str],
-    envs_in_batch: int,
     static_env_params_override=None,
 ):
-    """
-    Load predefined levels and replicate each one envs_in_batch times.
-    
+    """Load predefined level initial states (single copy per level).
+
+    Loads each level from ``level_names`` and returns it as a unique ``LogEnvState``
+    without replication. Use ``duplicate_env_states`` if copies are needed for training.
+
     Args:
-        level_names: List of level names (e.g., ["s/h0_weak_thrust", "s/h7_unicycle_left"])
-        envs_in_batch: Number of copies per level (ENVS_IN_BATCH)
-        static_env_params_override: Optional StaticEnvParams to pad all levels to a fixed capacity.
-            Useful for ensuring loaded levels match the env_size used by the network.
-    
+        level_names: List of level names (e.g., ["s/h0_weak_thrust", "s/h7_unicycle_left"]).
+        static_env_params_override: Optional ``StaticEnvParams`` to pad all levels to a
+            fixed capacity. Useful for ensuring loaded levels match the ``env_size``
+            used by the network.
+
     Returns:
-        reset_states: (NUM_LOADED_LEVELS, ENVS_IN_BATCH) pytree of LogEnvState, 
-                      each wrapping an individual env state
+        A pytree of ``LogEnvState`` with leading shape ``(num_levels, ...)``.
     """
-    # Load all levels (shape: (NUM_LEVELS, ...))
-    # If override is provided, levels are padded to that capacity via expand_env_state
     levels, static_env_params = load_evaluation_levels(
         level_names,
         static_env_params_override=static_env_params_override,
-    )
-    
-    # Replicate each level envs_in_batch times
-    # From (NUM_LEVELS, ...) to (NUM_LEVELS, ENVS_IN_BATCH, ...)
-    replicated = jax.tree.map(
-        lambda x: jnp.repeat(x[:, None, ...], envs_in_batch, axis=1),
-        levels,
     )
 
     def wrap_one(env_state):
@@ -80,10 +77,32 @@ def load_and_replicate_levels(
             timestep=0,
         )
 
-    # Double vmap to wrap each individual env state independently
-    wrapped = jax.vmap(jax.vmap(wrap_one))(replicated)
-    
-    return wrapped
+    return jax.vmap(wrap_one)(levels)
+
+def duplicate_env_states(unique_env_states, num_copies: int):
+    """Duplicate unique environment states along a new copies axis for stable PPO training.
+
+    Takes a pytree of unique env states with leading dimension (num_envs, ...)
+    and returns a pytree with shape (num_envs, num_copies, ...) where each row is
+    replicated ``num_copies`` times along axis 1.
+
+    This is useful when you want multiple independent copies of each environment
+    so that PPO training can average gradients over several copies per unique env.
+
+    Args:
+        unique_env_states: A pytree (typically ``LogEnvState`` or ``EnvState``) where each
+            leaf has shape ``(num_envs, ...)``.
+        num_copies: Number of times to replicate each environment.
+
+    Returns:
+        A pytree with the same structure as the input, where each leaf has shape
+        ``(num_envs, num_copies, ...)``.
+    """
+    return jax.tree.map(
+        lambda x: jnp.repeat(x[:, None, ...], num_copies, axis=1),
+        unique_env_states,
+    )
+
 
 COMPONENT_NAMES = [
     "n_polygons",       # 0: number of active polygon shapes

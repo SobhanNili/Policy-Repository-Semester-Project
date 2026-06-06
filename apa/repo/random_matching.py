@@ -1,44 +1,21 @@
 from apa.repo import PolicyRepo, PolicyState
-import jax.random as jr
+from apa.repo.base import get_pytree_batch_size
+import jax.numpy as jnp
 import jax
 
+
 class RandomMatchingRepo(PolicyRepo):
-    def __init__(self, config, batched_env_reset_states, rng) -> None:
-        super().__init__(config, batched_env_reset_states, rng)
+    """Random affinity: every candidate env is equally likely for every policy.
 
-    def match(self) -> jax.Array:
-        """Assigns each policy to a uniformly random environment.
-        
-        Returns:
-            jax.Array: Assignment array of shape (num_policies,).
-        """
-        self.rng, sub_rng = jr.split(self.rng)
-        
-        # one env per policy
-        policy2env_pairing = jr.choice(sub_rng,self.num_distinct_envs,shape=(self.num_policies,),replace=True)
+    Uniform affinity + categorical sampling in the base class produces truly
+    random assignment — no override of ``derive_assignment_mask`` needed.
+    """
 
-        return policy2env_pairing
-    
-    def update(self, policy_state: PolicyState, per_env_perf_history: dict, policy2env_pairing: jax.Array) -> None:
-        """Updates the repository with the trained policy state without tracking performance history.
-        
-        Args:
-            policy_state (PolicyState): The updated policy networks after PPO training.
-            per_env_perf_history (dict): Performance metrics collected across the training phase (ignored here).
-            policy2env_pairing (jax.Array): The environments assigned in the recent training step (ignored here).
-        """
-        self.policy_repo = policy_state # for now not paying attention to results
+    def __init__(self, config, train_env_reset_states, rng) -> None:
+        super().__init__(config, train_env_reset_states, rng)
 
-    def evaluate(self) -> jax.Array:
-        """Evaluates the repository by randomly assigning a policy to every distinct environment.
-        
-        Returns:
-            jax.Array: Array of shape (num_distinct_envs, 2) containing [solve_rate, avg_return].
-        """
-        self.rng, sub_rng = jr.split(self.rng)
-        
-        # assign one random policy to each distinct environment
-        env2policy_pairing = jr.choice(sub_rng, self.num_policies, shape=(self.num_distinct_envs,), replace=True)
-        
-        return self.evaluate_pairing(env2policy_pairing)
+    def compute_affinity(self, env_reset_states) -> jax.Array:
+        """Uniform affinity across policies — column-wise softmax of ones = 1/P."""
+        E_subset = get_pytree_batch_size(env_reset_states)
+        return jnp.ones((self.num_policies, E_subset)) / self.num_policies
 

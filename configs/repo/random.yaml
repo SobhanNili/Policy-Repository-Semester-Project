@@ -1,0 +1,4 @@
+# RandomMatchingRepo — uniform random affinity (baseline).
+# Every candidate environment is equally likely to be assigned to every policy.
+# No additional hyperparameters.
+repo_type: random_matching
