@@ -37,7 +37,7 @@ from tqdm.auto import tqdm
 
 import wandb  # noqa: E402
 
-from apa.utils.analysis import generate_plots  # noqa: E402
+from apa.utils.analysis import generate_plots, save_env_observations  # noqa: E402
 
 from apa.utils.config import load_config  # noqa: E402
 from apa.utils.env import (  # noqa: E402
@@ -325,11 +325,17 @@ def main(argv: list[str] | None = None) -> None:
     print(f"JAX devices: {jax.devices()}")
 
     # ── Environment creation ────────────────────────────────────────────────
-    _, _, _, train_env_reset_states, eval_env_reset_states, rng = setup_environments(config, rng)
+    env, env_params, static_env_params, train_env_reset_states, eval_env_reset_states, rng = setup_environments(config, rng)
     print(
         f"Created {config['num_train_envs']} training environments "
         f"(mode: {config['train_level_mode']})"
     )
+
+    # ── Save env observation images ─────────────────────────────────────────
+    save_env_observations(env_params, static_env_params, train_env_reset_states,
+                          run_dir, folder="env_train_observations")
+    save_env_observations(env_params, static_env_params, eval_env_reset_states,
+                          run_dir, folder="eval_env_observations")
 
     # ── Repo initialization ─────────────────────────────────────────────────
     print(f"Initializing {repo_type} repo with kwargs: {repo_kwargs}")

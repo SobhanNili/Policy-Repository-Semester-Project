@@ -21,6 +21,7 @@ import seaborn as sns
 from matplotlib.colors import ListedColormap
 from pathlib import Path
 from scipy.stats import spearmanr
+import jax
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -362,3 +363,47 @@ def generate_plots(step_logs: list, output_dir: Path) -> None:
     _plot_spearman(data, plots_dir)
 
     print(f"Saved 5 plots to {plots_dir}")
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Environment observation visualization
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def save_env_observations(env_params, static_env_params,
+                           env_reset_states, output_dir: Path,
+                           folder: str = "env_train_observations") -> None:
+    """Render and save first-observation images for a set of environments.
+
+    Each image is saved as ``env_{index:03d}.png`` in
+    ``output_dir / folder /``.
+
+    This is a standalone utility that creates its own pixel renderer — it
+    does not interact with the repository logic.  The render+rotate pattern
+    matches ``DinoMatchingRepo._encode_pixels``.
+
+    Args:
+        env_params: Kinetix environment parameters.
+        static_env_params: Kinetix static environment parameters.
+        env_reset_states: Pytree of ``LogEnvState`` with leading dimension E.
+        output_dir: Path to the run's output directory.
+        folder: Subfolder name inside ``output_dir`` for the images.
+                 Default ``"env_train_observations"``.
+    """
+    from kinetix.render.renderer_pixels import make_render_pixels_rl
+    renderer = make_render_pixels_rl(env_params, static_env_params)
+    pixels = jax.vmap(lambda s: renderer(s.env_state))(env_reset_states).image
+    pixels_np = np.array(pixels)
+    pixels_np = np.rot90(pixels_np, k=1, axes=(1, 2))
+
+    out_dir = output_dir / folder
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    E = pixels_np.shape[0]
+    for i in range(E):
+        fig, ax = plt.subplots(figsize=(3, 3))
+        ax.imshow(pixels_np[i])
+        ax.axis("off")
+        fig.savefig(out_dir / f"env_{i:03d}.png",
+                    bbox_inches="tight", pad_inches=0)
+        plt.close(fig)
+
+    print(f"Saved {E} environment observation images to {out_dir}")
