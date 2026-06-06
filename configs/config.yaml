@@ -44,6 +44,8 @@ candidate_pool_size: 4        # distinct envs randomly sampled per repo step;
 # ── Evaluation ───────────────────────────────────────────────────────────────
 eval_rollout_steps: 512       # rollout steps for frozen-policy evaluation;
                               #   environments auto-reset after 256 steps (Kinetix truncation)
+evaluate_finetune_steps: 100    # PPO steps for per-env fine-tuning in evaluate_finetune;
+                              #   fine-tuned params are discarded after evaluation
 
 # ── Assignment ───────────────────────────────────────────────────────────────
 assignment_mode: greedy       # "greedy" (argmax), "softmax", or "epsilon_greedy"

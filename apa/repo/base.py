@@ -259,7 +259,9 @@ class PolicyRepo(ABC):
             return network_apply, env_step
 
         def evaluate_pairing(self, pairing: jax.Array, env_states,
-                             rollout_steps: int) -> jax.Array:
+                             rollout_steps: int,
+                             params,
+                             hstate) -> jax.Array:
             """Evaluates a specific pairing of policies to environments.
 
             Supports two modes based on input shape:
@@ -272,6 +274,8 @@ class PolicyRepo(ABC):
                 pairing: assignment array (1D or 2D).
                 env_states: pytree of environment reset states to evaluate on.
                 rollout_steps: number of rollout steps.
+                params: pytree of policy parameters, indexable by ``policy_indices``.
+                hstate: pytree of policy hidden states, indexable by ``policy_indices``.
             """
             n_envs = get_pytree_batch_size(env_states)
             if pairing.ndim == 1:
@@ -290,8 +294,8 @@ class PolicyRepo(ABC):
             else:
                 raise ValueError(f"pairing must be 1D or 2D, got shape {pairing.shape}")
 
-            params = jax.tree.map(lambda x: x[policy_indices], self.policy_repo.train_state.params)
-            hstate = jax.tree.map(lambda x: x[policy_indices, 0], self.policy_repo.hstate)
+            params = jax.tree.map(lambda x: x[policy_indices], params)
+            hstate = jax.tree.map(lambda x: x[policy_indices, 0], hstate)
 
             env_state = jax.tree.map(lambda x: x[env_indices], env_states)
             obs = jax.vmap(self.env.get_obs)(env_state.env_state)
@@ -328,7 +332,9 @@ class PolicyRepo(ABC):
             P, E = self.num_policies, self.num_distinct_envs
             all_pairs = jnp.arange(E)[None, :].repeat(P, axis=0)  # (P, E)
             return self.evaluate_pairing(all_pairs, self.train_env_reset_states,
-                                         rollout_steps=self.eval_rollout_steps)
+                                         rollout_steps=self.eval_rollout_steps,
+                                         params=self.policy_repo.train_state.params,
+                                         hstate=self.policy_repo.hstate)
 
         def advance(self):
             """Execute one repository step: sample candidates, compute affinity,
@@ -466,7 +472,9 @@ class PolicyRepo(ABC):
             E_subset = candidate_env_indices.shape[0]
             all_pairs = jnp.tile(candidate_env_indices[None, :], (self.num_policies, 1))  # (P, E_subset)
             results = self.evaluate_pairing(all_pairs, self.train_env_reset_states,
-                                            rollout_steps=self.eval_rollout_steps)  # (P, E_subset, 2)
+                                            rollout_steps=self.eval_rollout_steps,
+                                            params=self.policy_repo.train_state.params,
+                                            hstate=self.policy_repo.hstate)  # (P, E_subset, 2)
 
             # Mask inactive pairs with NaN
             mask_expanded = active_mask.T[:, :, None]  # (P, E_subset, 1)
@@ -485,7 +493,7 @@ class PolicyRepo(ABC):
                 avg_return=avg_return,
             ))
 
-        def evaluate(self, eval_env_reset_states) -> tuple[jax.Array, jax.Array, jax.Array]:
+        def evaluate_frozen(self, eval_env_reset_states) -> tuple[jax.Array, jax.Array, jax.Array]:
             """Evaluates the repository on a set of evaluation environments.
 
             Args:
@@ -499,8 +507,95 @@ class PolicyRepo(ABC):
             """
             affinity = self.compute_affinity(eval_env_reset_states)
             env2policy = jnp.argmax(affinity, axis=0)
-            eval_metrics = self.evaluate_pairing(env2policy, eval_env_reset_states, rollout_steps=self.eval_rollout_steps)
+            eval_metrics = self.evaluate_pairing(env2policy, eval_env_reset_states,
+                                                  rollout_steps=self.eval_rollout_steps,
+                                                  params=self.policy_repo.train_state.params,
+                                                  hstate=self.policy_repo.hstate)
             return affinity, env2policy, eval_metrics
+
+        def evaluate_finetune(self, eval_env_reset_states) -> tuple[jax.Array, jax.Array, jax.Array]:
+            """Evaluates with per-env policy fine-tuning before rollout.
+
+            Each eval environment is assigned to its best policy (by affinity),
+            then a temporary copy of that policy is fine-tuned on that environment
+            for ``evaluate_finetune_steps`` PPO steps before evaluation.
+            The fine-tuned parameters are discarded — the repository is unchanged.
+
+            All E_eval fine-tuning runs are batched into a single ``ppo_step``
+            call per iteration: E_eval pseudo-policies, each with C env copies
+            of its assigned environment, fully vmapped with no mask needed.
+
+            Args:
+                eval_env_reset_states: pytree of evaluation env reset states.
+
+            Returns:
+                Tuple of (affinity, env2policy, finetuned_metrics):
+                - affinity: (P, E_eval) array of affinity scores for each policy-env pair
+                - env2policy: (E_eval,) array mapping each eval env to its assigned policy
+                - finetuned_metrics: (E_eval, 2) array with [solve_rate, avg_return]
+                  for each eval env under its fine-tuned assigned policy.
+            """
+            num_steps = int(self.config.get("evaluate_finetune_steps", 5))
+            C = self.num_copies_per_env
+
+            # 1. Affinity and assignment (same as evaluate_frozen)
+            affinity = self.compute_affinity(eval_env_reset_states)
+            env2policy = jnp.argmax(affinity, axis=0)  # (E_eval,)
+            E_eval = env2policy.shape[0]
+
+            # 2. Copy params for all E_eval pseudo-policies at once
+            ft_params = jax.tree.map(
+                lambda x: x[env2policy], self.policy_repo.train_state.params
+            )  # (E_eval, ...)
+            ft_opt_state = jax.tree.map(
+                lambda x: x[env2policy], self.policy_repo.train_state.opt_state
+            )
+            ft_step = self.policy_repo.train_state.step[env2policy]
+            ft_hstate = jax.tree.map(
+                lambda x: x[env2policy], self.policy_repo.hstate
+            )  # (E_eval, hstate_dim)
+
+            ft_train_state = TrainState(
+                step=ft_step,
+                apply_fn=self.policy_repo.train_state.apply_fn,
+                params=ft_params,
+                tx=self.policy_repo.train_state.tx,
+                opt_state=ft_opt_state,
+            )
+
+            # 3. Prepare per-pseudo-policy env states: (E_eval, C, ...)
+            #    Pseudo-policy e gets C copies of eval env e.
+            batched_envs = duplicate_env_states(eval_env_reset_states, C)
+            obs = jax.vmap(jax.vmap(self.env.get_obs))(batched_envs.env_state)
+            # obs shape: (E_eval, C, ...)
+
+            # 4. Fine-tuning: one ppo_step call per iteration, vmapped over E_eval
+            #    No mask needed — every pseudo-policy trains on all C of its env copies.
+            for _ in range(num_steps):
+                self.rng, rollout_rng, update_rng = jax.random.split(self.rng, 3)
+                rollout_rngs = jax.random.split(rollout_rng, E_eval)
+                update_rngs = jax.random.split(update_rng, E_eval)
+
+                ft_train_state, ft_hstate, obs, batched_envs, _, _ = self.ppo_step(
+                    ft_train_state,
+                    ft_hstate,
+                    obs,
+                    batched_envs,
+                    rollout_rngs,
+                    update_rngs,
+                    batched_envs,  # reset_state_override: auto-reset to the same envs
+                )
+
+            # 5. Batched evaluation: identity pairing — pseudo-policy e → env e
+            finetuned_metrics = self.evaluate_pairing(
+                jnp.arange(E_eval),
+                eval_env_reset_states,
+                rollout_steps=self.eval_rollout_steps,
+                params=ft_train_state.params,
+                hstate=ft_hstate,
+            )  # (E_eval, 2)
+
+            return affinity, env2policy, finetuned_metrics
 
         # ── Hook (non-abstract, overridable) ─────────────────────────────────
 

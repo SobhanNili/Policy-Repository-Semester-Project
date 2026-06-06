@@ -88,7 +88,9 @@ class PerformanceMatchingRepo(PolicyRepo):
         # all_pairs: (P, E_subset) — row p is [0, 1, …, E_subset-1].
         all_pairs = jnp.arange(E_subset)[None, :].repeat(P, axis=0)
         results = self.evaluate_pairing(
-            all_pairs, env_reset_states, rollout_steps=self.num_eval_steps
+            all_pairs, env_reset_states, rollout_steps=self.num_eval_steps,
+            params=self.policy_repo.train_state.params,
+            hstate=self.policy_repo.hstate,
         )  # (P, E_subset, 2)
 
         solve_rate = results[:, :, 0]   # (P, E_subset) ∈ [0, 1]
