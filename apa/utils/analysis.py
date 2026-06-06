@@ -3,6 +3,13 @@
 This module is the single source of truth for diagnostic plotting logic.
 It is used by both ``scripts/run.py`` (during training) and
 ``scripts/plot_results.py`` (standalone post-hoc analysis).
+
+Generates 5 diagnostic plots:
+    1. Policy Performance (per-policy mean solve rate & avg return over steps)
+    2. Active Environments per Policy (stackplot)
+    3. Assignment Certainty (CV = σ/μ per env, box plot per step)
+    4. Greedy Assignment Heatmap (env × step, colored by assigned policy)
+    5. Affinity–Solve Rate Spearman Correlation
 """
 
 import matplotlib
@@ -11,33 +18,56 @@ matplotlib.use("Agg")  # headless — must be set before importing pyplot
 import matplotlib.pyplot as plt
 import numpy as np
 import seaborn as sns
+from matplotlib.colors import ListedColormap
 from pathlib import Path
 from scipy.stats import spearmanr
 
 
-def generate_plots(step_logs: list, output_dir: Path) -> None:
-    """Generate all 5 diagnostic plots from step_logs and save to output_dir/plots/.
+# ═══════════════════════════════════════════════════════════════════════════════
+# Data unpacking
+# ═══════════════════════════════════════════════════════════════════════════════
 
-    Args:
-        step_logs: list of RepoStepLog namedtuples from a completed run.
-        output_dir: path to the run's output directory.
+def _unpack_step_logs(step_logs: list) -> dict:
+    """Convert a list of ``RepoStepLog`` namedtuples into a dictionary of
+    numpy arrays plus precomputed derived metrics.
+
+    Returns keys:
+        T, P, E_subset, num_envs  — dimensions
+        affinities       (T, P, E_subset)
+        active_masks     (T, E_subset, P)
+        solve_rates      (T, P, E_subset)
+        avg_returns      (T, P, E_subset)
+        candidate_env_indices  (T, E_subset)
+        mean_solve_rate  (T, P)  — mean over active envs only
+        mean_avg_return  (T, P)  — mean over active envs only
+        n_active_envs    (T, P)  — count of active envs
+        cv_per_env       (T, E_subset)  — σ_p / μ_p per candidate env
+        spearman_rhos    (T,)    — Spearman ρ per step (NaN if degenerate)
+        assignment       (num_envs, T)  — greedy argmax per (env, step), NaN if not sampled
     """
-    plots_dir = output_dir / "plots"
-    plots_dir.mkdir(parents=True, exist_ok=True)
-
-    sns.set_theme(style="whitegrid", palette="muted", font_scale=1.1)
-
     T = len(step_logs)
     P = step_logs[0].affinity_scores.shape[0]
+    E_subset = step_logs[0].affinity_scores.shape[1]
 
-    # ── Unpack step_logs into numpy arrays ──────────────────────────────────
-    affinities = np.stack([np.array(log.affinity_scores) for log in step_logs])  # (T, P, E)
-    active_masks = np.stack([np.array(log.active_mask) for log in step_logs])  # (T, E, P)
-    solve_rates = np.stack([np.array(log.solve_rate) for log in step_logs])  # (T, P, E)
-    avg_returns = np.stack([np.array(log.avg_return) for log in step_logs])  # (T, P, E)
+    # ── Raw arrays ──────────────────────────────────────────────────────
+    affinities = np.stack(
+        [np.array(log.affinity_scores) for log in step_logs]
+    )  # (T, P, E_subset)
+    active_masks = np.stack(
+        [np.array(log.active_mask) for log in step_logs]
+    )  # (T, E_subset, P)
+    solve_rates = np.stack(
+        [np.array(log.solve_rate) for log in step_logs]
+    )  # (T, P, E_subset)
+    avg_returns = np.stack(
+        [np.array(log.avg_return) for log in step_logs]
+    )  # (T, P, E_subset)
+    candidate_env_indices = np.stack(
+        [np.array(log.candidate_env_indices) for log in step_logs]
+    )  # (T, E_subset)
 
-    # ── Derived metrics ─────────────────────────────────────────────────────
-    active_for_metric = active_masks.transpose(0, 2, 1)  # (T, P, E)
+    # ── Per-policy active metrics ───────────────────────────────────────
+    active_for_metric = active_masks.transpose(0, 2, 1)  # (T, P, E_subset)
 
     mean_solve_rate = np.full((T, P), np.nan)
     mean_avg_return = np.full((T, P), np.nan)
@@ -55,14 +85,12 @@ def generate_plots(step_logs: list, output_dir: Path) -> None:
                     np.where(active, avg_returns[t, p], np.nan)
                 )
 
-    # ── Utility margin: per-env gap between best and second-best raw score ──
-    # Sorted along policy axis: best (index -1), second-best (index -2)
-    sorted_aff = np.sort(affinities, axis=1)  # (T, P, E) — ascending
-    per_env_margins = sorted_aff[:, -1, :] - sorted_aff[:, -2, :]  # (T, E)
-    mean_margin = per_env_margins.mean(axis=1)
-    std_margin = per_env_margins.std(axis=1)
+    # ── CV per env: σ_p(affinity) / μ_p(affinity) ───────────────────────
+    mean_p = affinities.mean(axis=1)   # (T, E_subset)
+    std_p  = affinities.std(axis=1)    # (T, E_subset)
+    cv_per_env = std_p / (mean_p + 1e-8)
 
-    # Spearman correlation
+    # ── Spearman ρ (affinity vs solve rate, pooled over P×E_subset) ─────
     spearman_rhos = np.full(T, np.nan)
     for t in range(T):
         aff_flat = affinities[t].ravel()
@@ -76,21 +104,60 @@ def generate_plots(step_logs: list, output_dir: Path) -> None:
             rho, _ = spearmanr(aff_flat[valid], sr_flat[valid])
             spearman_rhos[t] = rho
 
-    steps = np.arange(T)
-    colors = sns.color_palette("muted", P)
+    # ── Greedy-assignment matrix: (num_envs, T) ─────────────────────────
+    num_envs = int(candidate_env_indices.max()) + 1
+    assignment = np.full((num_envs, T), np.nan)
+    for t in range(T):
+        for local_i in range(E_subset):
+            env_idx = int(candidate_env_indices[t, local_i])
+            policy_idx = int(np.argmax(affinities[t, :, local_i]))
+            assignment[env_idx, t] = policy_idx
 
-    # ── Plot 1: Policy Performance Over Steps ───────────────────────────────
+    return {
+        "T": T,
+        "P": P,
+        "E_subset": E_subset,
+        "num_envs": num_envs,
+        "affinities": affinities,
+        "active_masks": active_masks,
+        "solve_rates": solve_rates,
+        "avg_returns": avg_returns,
+        "candidate_env_indices": candidate_env_indices,
+        "mean_solve_rate": mean_solve_rate,
+        "mean_avg_return": mean_avg_return,
+        "n_active_envs": n_active_envs,
+        "cv_per_env": cv_per_env,
+        "spearman_rhos": spearman_rhos,
+        "assignment": assignment,
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Plot helpers
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _thin_ticks(ax, steps, max_ticks: int = 15):
+    """Limit x-axis tick labels to at most *max_ticks* evenly-spaced positions."""
+    T = len(steps)
+    if T <= max_ticks:
+        return
+    step = max(1, T // max_ticks)
+    ax.set_xticks(steps[::step])
+    ax.set_xticklabels(steps[::step])
+
+
+def _plot_performance(data, plots_dir, colors):
+    """Plot 1: per-policy mean solve rate and avg return over steps."""
+    T, P = data["T"], data["P"]
+    steps = np.arange(T)
+
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 7), sharex=True)
 
     for p in range(P):
         ax1.plot(
-            steps,
-            mean_solve_rate[:, p],
-            color=colors[p],
-            lw=2,
-            label=f"Policy {p}",
-            marker=".",
-            markersize=4,
+            steps, data["mean_solve_rate"][:, p],
+            color=colors[p], lw=2, label=f"Policy {p}",
+            marker=".", markersize=4,
         )
     ax1.set_ylabel("Solve Rate")
     ax1.set_title("Policy Performance on Active Envs Over Training")
@@ -99,13 +166,9 @@ def generate_plots(step_logs: list, output_dir: Path) -> None:
 
     for p in range(P):
         ax2.plot(
-            steps,
-            mean_avg_return[:, p],
-            color=colors[p],
-            lw=2,
-            label=f"Policy {p}",
-            marker=".",
-            markersize=4,
+            steps, data["mean_avg_return"][:, p],
+            color=colors[p], lw=2, label=f"Policy {p}",
+            marker=".", markersize=4,
         )
     ax2.set_ylabel("Avg Return")
     ax2.set_xlabel("Repo Step")
@@ -115,15 +178,18 @@ def generate_plots(step_logs: list, output_dir: Path) -> None:
     fig.savefig(plots_dir / "plot_1_performance.png", dpi=150, bbox_inches="tight")
     plt.close(fig)
 
-    # ── Plot 2: Active Envs Per Policy ──────────────────────────────────────
-    fig, ax = plt.subplots(1, 1, figsize=(10, 4))
+
+def _plot_active_envs(data, plots_dir, colors):
+    """Plot 2: stackplot of active environment counts per policy."""
+    T, P = data["T"], data["P"]
+    steps = np.arange(T)
+
+    fig, ax = plt.subplots(figsize=(10, 4))
 
     ax.stackplot(
-        steps,
-        n_active_envs.T,
+        steps, data["n_active_envs"].T,
         labels=[f"Policy {p}" for p in range(P)],
-        colors=colors,
-        alpha=0.85,
+        colors=colors, alpha=0.85,
     )
     ax.set_xlabel("Repo Step")
     ax.set_ylabel("Number of Active Envs")
@@ -135,97 +201,164 @@ def generate_plots(step_logs: list, output_dir: Path) -> None:
     fig.savefig(plots_dir / "plot_2_active_envs.png", dpi=150, bbox_inches="tight")
     plt.close(fig)
 
-    # ── Plot 3: Assignment Decisiveness (Utility Margin) ────────────────────
-    fig, ax = plt.subplots(1, 1, figsize=(10, 4))
 
-    ax.plot(steps, mean_margin, color="tab:blue", lw=2, label="Mean margin")
-    ax.fill_between(
-        steps,
-        mean_margin - std_margin,
-        mean_margin + std_margin,
-        alpha=0.2,
-        color="tab:blue",
-        label="±1 std",
+def _plot_certainty(data, plots_dir):
+    """Plot 3: box plot of per-environment CV (σ/μ) at each repo step.
+
+    Each box shows the distribution of CV across the E_subset candidate
+    environments for that step.  A rising trend indicates that affinity
+    scores are spreading out — policies are developing differentiated
+    "opinions" about individual environments.
+    """
+    cv = data["cv_per_env"]        # (T, E_subset)
+    T = data["T"]
+    steps = np.arange(T)
+
+    fig, ax = plt.subplots(figsize=(10, 5))
+
+    box_data = [cv[t] for t in range(T)]
+    bp = ax.boxplot(
+        box_data, positions=steps, widths=0.6,
+        patch_artist=True, showfliers=True,
+        boxprops={"facecolor": "lightblue", "alpha": 0.6},
+        medianprops={"color": "darkblue", "lw": 1.5},
+        whiskerprops={"color": "gray"},
+        capprops={"color": "gray"},
+        flierprops={"marker": ".", "markersize": 3, "alpha": 0.4, "markeredgewidth": 0},
     )
-    ax.axhline(0, color="gray", ls="--", lw=1, label="Zero margin (ties)")
+
+    # Overlay the mean CV per step
+    mean_cv = np.nanmean(cv, axis=1)
+    ax.plot(steps, mean_cv, "o-", color="darkred", lw=2, markersize=4,
+            label="Mean CV")
+
     ax.set_xlabel("Repo Step")
-    ax.set_ylabel("Mean Utility Margin")
-    ax.set_title("Assignment Decisiveness Over Training")
-    ax.legend(loc="upper right")
+    ax.set_ylabel(r"CV ($\sigma$ / $\mu$) per Environment")
+    ax.set_title("Assignment Certainty Over Training")
+    ax.legend(loc="upper left")
+
+    _thin_ticks(ax, steps)
 
     plt.tight_layout()
-    fig.savefig(plots_dir / "plot_3_margin.png", dpi=150, bbox_inches="tight")
+    fig.savefig(plots_dir / "plot_3_certainty.png", dpi=150, bbox_inches="tight")
     plt.close(fig)
 
-    # ── Plot 4: Solve Rate by Affinity Quantile ─────────────────────────────
-    n_bins = 5
-    bin_edges = np.linspace(0.0, 1.0, n_bins + 1)
-    binned_solve_rate = np.full((T, n_bins), np.nan)
-    bin_labels = [
-        f"[{bin_edges[i]:.1f}, {bin_edges[i + 1]:.1f})" for i in range(n_bins)
-    ]
 
-    for t in range(T):
-        aff_flat = affinities[t].ravel()
-        sr_flat = solve_rates[t].ravel()
-        valid = ~np.isnan(sr_flat)
-        if valid.any():
-            aff_v = aff_flat[valid]
-            sr_v = sr_flat[valid]
-            for b in range(n_bins):
-                lo, hi = bin_edges[b], bin_edges[b + 1]
-                if b == n_bins - 1:
-                    in_bin = (aff_v >= lo) & (aff_v <= hi)
-                else:
-                    in_bin = (aff_v >= lo) & (aff_v < hi)
-                if in_bin.sum() > 0:
-                    binned_solve_rate[t, b] = sr_v[in_bin].mean()
+def _plot_assignment_heatmap(data, plots_dir, colors):
+    """Plot 4: env × step heatmap of greedy argmax assignments.
 
-    fig, ax = plt.subplots(1, 1, figsize=(10, 5))
-    palette = sns.color_palette("viridis", n_bins)
+    Rows = individual training environments (0 … E−1).
+    Columns = repo steps.
+    Cell color = which policy would be assigned by pure argmax (before
+    safety nets).  White cells = env was not in the candidate set that step.
 
-    for b in range(n_bins):
-        ax.plot(
-            steps,
-            binned_solve_rate[:, b],
-            color=palette[b],
-            lw=2,
-            label=bin_labels[b],
-            marker=".",
-            markersize=4,
-        )
+    Solid horizontal bands indicate stable ownership; flickering rows
+    indicate contested environments.
+    """
+    assignment = data["assignment"]   # (num_envs, T) — NaN where not sampled
+    num_envs, T = data["num_envs"], data["T"]
+    P = data["P"]
+
+    cmap = ListedColormap(colors)
+    cmap.set_bad("whitesmoke")
+
+    # Proportional height so individual rows stay legible
+    fig_height = np.clip(num_envs * 0.15, 4, 20)
+    fig, ax = plt.subplots(figsize=(10, fig_height))
+
+    X = np.arange(T + 1)
+    Y = np.arange(num_envs + 1)
+    masked = np.ma.masked_invalid(assignment)
+
+    mesh = ax.pcolormesh(
+        X, Y, masked, cmap=cmap,
+        vmin=-0.5, vmax=P - 0.5,
+        edgecolors="none", linewidth=0, shading="flat",
+    )
+
+    cbar = plt.colorbar(mesh, ax=ax, ticks=np.arange(P))
+    cbar.set_label("Assigned Policy")
+    cbar.ax.set_yticklabels([f"Policy {p}" for p in range(P)])
+
     ax.set_xlabel("Repo Step")
-    ax.set_ylabel("Mean Solve Rate")
-    ax.set_title("Solve Rate by Affinity Quintile Over Training")
-    ax.legend(title="Affinity bin", loc="upper left", bbox_to_anchor=(1, 1))
-    ax.set_ylim(-0.05, 1.05)
+    ax.set_ylabel("Environment Index")
+    ax.set_title("Greedy Assignment per Environment Over Training")
+
+    # Tick layout
+    _thin_ticks(ax, np.arange(T) + 0.5, max_ticks=15)
+    ax.set_yticks(np.arange(num_envs) + 0.5)
+    y_fontsize = 8 if num_envs <= 50 else (6 if num_envs <= 100 else 4)
+    ax.set_yticklabels(np.arange(num_envs), fontsize=y_fontsize)
+    ax.set_xlim(0, T)
+    ax.set_ylim(0, num_envs)
+    ax.invert_yaxis()  # env 0 at top
 
     plt.tight_layout()
-    fig.savefig(
-        plots_dir / "plot_4_affinity_quantiles.png", dpi=150, bbox_inches="tight"
-    )
+    fig.savefig(plots_dir / "plot_4_assignment_heatmap.png", dpi=150,
+                bbox_inches="tight")
     plt.close(fig)
 
-    # ── Plot 5: Affinity–Performance Spearman Correlation ───────────────────
-    fig, ax = plt.subplots(1, 1, figsize=(10, 4))
 
-    valid = ~np.isnan(spearman_rhos)
+def _plot_spearman(data, plots_dir):
+    """Plot 5: Spearman ρ between affinity scores and solve rates over steps."""
+    T = data["T"]
+    rho = data["spearman_rhos"]
+    steps = np.arange(T)
+    valid = ~np.isnan(rho)
+
+    fig, ax = plt.subplots(figsize=(10, 4))
+
     ax.plot(
-        steps[valid],
-        spearman_rhos[valid],
-        color="tab:green",
-        lw=2,
-        marker=".",
-        markersize=4,
+        steps[valid], rho[valid],
+        color="tab:green", lw=2, marker=".", markersize=4,
     )
-    ax.axhline(0, color="gray", ls="--", lw=1, label="ρ = 0 (no correlation)")
+    ax.axhline(0, color="gray", ls="--", lw=1, label=r"$\rho = 0$ (no correlation)")
     ax.set_xlabel("Repo Step")
-    ax.set_ylabel("Spearman ρ")
+    ax.set_ylabel(r"Spearman $\rho$")
     ax.set_title("Affinity–Solve Rate Correlation Over Training")
     ax.legend(loc="lower right")
+
+    _thin_ticks(ax, steps)
 
     plt.tight_layout()
     fig.savefig(plots_dir / "plot_5_spearman.png", dpi=150, bbox_inches="tight")
     plt.close(fig)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Public API
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def generate_plots(step_logs: list, output_dir: Path) -> None:
+    """Generate all 5 diagnostic plots from step_logs and save to output_dir/plots/.
+
+    Plots produced:
+        1. Policy Performance — per-policy mean solve rate & avg return
+        2. Active Environments — stackplot of env counts per policy
+        3. Assignment Certainty — box plot of CV (σ/μ) per candidate env
+        4. Assignment Heatmap — env × step greedy-argmax assignment matrix
+        5. Spearman Correlation — affinity vs solve rate rank correlation
+
+    Args:
+        step_logs: list of RepoStepLog namedtuples from a completed run.
+        output_dir: path to the run's output directory.
+    """
+    if not step_logs:
+        print("Warning: empty step_logs — nothing to plot.")
+        return
+
+    plots_dir = output_dir / "plots"
+    plots_dir.mkdir(parents=True, exist_ok=True)
+
+    sns.set_theme(style="whitegrid", palette="muted", font_scale=1.1)
+
+    data = _unpack_step_logs(step_logs)
+    colors = sns.color_palette("muted", data["P"])
+
+    _plot_performance(data, plots_dir, colors)
+    _plot_active_envs(data, plots_dir, colors)
+    _plot_certainty(data, plots_dir)
+    _plot_assignment_heatmap(data, plots_dir, colors)
+    _plot_spearman(data, plots_dir)
 
     print(f"Saved 5 plots to {plots_dir}")
