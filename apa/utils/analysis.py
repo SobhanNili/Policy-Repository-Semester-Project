@@ -4,12 +4,14 @@ This module is the single source of truth for diagnostic plotting logic.
 It is used by both ``scripts/run.py`` (during training) and
 ``scripts/plot_results.py`` (standalone post-hoc analysis).
 
-Generates 5 diagnostic plots:
+Generates 7 diagnostic plots:
     1. Policy Performance (per-policy mean solve rate & avg return over steps)
     2. Active Environments per Policy (stackplot)
     3. Assignment Certainty (CV = σ/μ per env, box plot per step)
     4. Greedy Assignment Heatmap (env × step, colored by assigned policy)
-    5. Affinity–Solve Rate Spearman Correlation
+    5a. Affinity–Solve Rate Spearman ρ (Pre-Training Frozen)
+    5b. Affinity–Solve Rate Spearman ρ (Pre-Training Finetuned)
+    5c. Affinity–Solve Rate Spearman ρ (Post-Training Frozen)
 """
 
 import matplotlib
@@ -36,14 +38,16 @@ def _unpack_step_logs(step_logs: list) -> dict:
         T, P, E_subset, num_envs  — dimensions
         affinities       (T, P, E_subset)
         active_masks     (T, E_subset, P)
-        solve_rates      (T, P, E_subset)
-        avg_returns      (T, P, E_subset)
+        solve_rates      (T, P, E_subset)  — post-training, unmasked
+        avg_returns      (T, P, E_subset)  — post-training, unmasked
         candidate_env_indices  (T, E_subset)
         mean_solve_rate  (T, P)  — mean over active envs only
         mean_avg_return  (T, P)  — mean over active envs only
         n_active_envs    (T, P)  — count of active envs
         cv_per_env       (T, E_subset)  — σ_p / μ_p per candidate env
-        spearman_rhos    (T,)    — Spearman ρ per step (NaN if degenerate)
+        spearman_pre_frozen    (T, E_subset)  — per-env ρ, pre-training frozen
+        spearman_pre_finetune  (T, E_subset)  — per-env ρ, pre-training finetuned
+        spearman_post_frozen   (T, E_subset)  — per-env ρ, post-training frozen
         assignment       (num_envs, T)  — greedy argmax per (env, step), NaN if not sampled
     """
     T = len(step_logs)
@@ -59,9 +63,21 @@ def _unpack_step_logs(step_logs: list) -> dict:
     )  # (T, E_subset, P)
     solve_rates = np.stack(
         [np.array(log.solve_rate) for log in step_logs]
-    )  # (T, P, E_subset)
+    )  # (T, P, E_subset)  — post-training, unmasked
     avg_returns = np.stack(
         [np.array(log.avg_return) for log in step_logs]
+    )  # (T, P, E_subset)  — post-training, unmasked
+    pre_frozen_solve_rates = np.stack(
+        [np.array(log.pre_frozen_solve_rate) for log in step_logs]
+    )  # (T, P, E_subset)
+    pre_frozen_avg_returns = np.stack(
+        [np.array(log.pre_frozen_avg_return) for log in step_logs]
+    )  # (T, P, E_subset)
+    pre_finetune_solve_rates = np.stack(
+        [np.array(log.pre_finetune_solve_rate) for log in step_logs]
+    )  # (T, P, E_subset)
+    pre_finetune_avg_returns = np.stack(
+        [np.array(log.pre_finetune_avg_return) for log in step_logs]
     )  # (T, P, E_subset)
     candidate_env_indices = np.stack(
         [np.array(log.candidate_env_indices) for log in step_logs]
@@ -91,19 +107,16 @@ def _unpack_step_logs(step_logs: list) -> dict:
     std_p  = affinities.std(axis=1)    # (T, E_subset)
     cv_per_env = std_p / (mean_p + 1e-8)
 
-    # ── Spearman ρ (affinity vs solve rate, pooled over P×E_subset) ─────
-    spearman_rhos = np.full(T, np.nan)
-    for t in range(T):
-        aff_flat = affinities[t].ravel()
-        sr_flat = solve_rates[t].ravel()
-        valid = ~np.isnan(sr_flat)
-        if (
-            valid.sum() > 2
-            and np.ptp(aff_flat[valid]) > 0
-            and np.ptp(sr_flat[valid]) > 0
-        ):
-            rho, _ = spearmanr(aff_flat[valid], sr_flat[valid])
-            spearman_rhos[t] = rho
+    # ── Per-environment Spearman ρ (affinity vs solve rate per column) ───
+    spearman_pre_frozen = _compute_per_env_spearman(
+        affinities, pre_frozen_solve_rates, T, P, E_subset
+    )  # (T, E_subset)
+    spearman_pre_finetune = _compute_per_env_spearman(
+        affinities, pre_finetune_solve_rates, T, P, E_subset
+    )  # (T, E_subset)
+    spearman_post_frozen = _compute_per_env_spearman(
+        affinities, solve_rates, T, P, E_subset
+    )  # (T, E_subset)
 
     # ── Greedy-assignment matrix: (num_envs, T) ─────────────────────────
     num_envs = int(candidate_env_indices.max()) + 1
@@ -128,9 +141,42 @@ def _unpack_step_logs(step_logs: list) -> dict:
         "mean_avg_return": mean_avg_return,
         "n_active_envs": n_active_envs,
         "cv_per_env": cv_per_env,
-        "spearman_rhos": spearman_rhos,
+        "spearman_pre_frozen": spearman_pre_frozen,
+        "spearman_pre_finetune": spearman_pre_finetune,
+        "spearman_post_frozen": spearman_post_frozen,
         "assignment": assignment,
     }
+
+
+def _compute_per_env_spearman(affinities, solve_rates, T, P, E_subset):
+    """Compute per-environment Spearman ρ between affinity and solve rate.
+
+    For each step *t* and candidate environment *e*, computes
+    ρ = Spearman(affinity[:, e], solve_rate[:, e]) across the P policies.
+    This avoids cross-environment scale artifacts that plague pooled ρ.
+
+    Args:
+        affinities: (T, P, E_subset) array.
+        solve_rates: (T, P, E_subset) array (may contain NaN).
+        T, P, E_subset: dimensions.
+
+    Returns:
+        (T, E_subset) array; entry (t, e) is NaN when fewer than 2 valid
+        pairs or zero variance in either variable.
+    """
+    rho = np.full((T, E_subset), np.nan)
+    for t in range(T):
+        for e in range(E_subset):
+            aff_col = affinities[t, :, e]
+            sr_col = solve_rates[t, :, e]
+            valid = ~np.isnan(sr_col)
+            if (
+                valid.sum() >= 2
+                and np.ptp(aff_col[valid]) > 0
+                and np.ptp(sr_col[valid]) > 0
+            ):
+                rho[t, e], _ = spearmanr(aff_col[valid], sr_col[valid])
+    return rho
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -300,29 +346,61 @@ def _plot_assignment_heatmap(data, plots_dir, colors):
     plt.close(fig)
 
 
-def _plot_spearman(data, plots_dir):
-    """Plot 5: Spearman ρ between affinity scores and solve rates over steps."""
+def _plot_per_env_spearman(data, plots_dir, rho_key, title, filename):
+    """Box plot of per-environment Spearman ρ at each repo step.
+
+    Each box shows the distribution of ρ across the E_subset candidate
+    environments for that step.  A rising trend indicates the affinity
+    metric is becoming more predictive of performance *within* individual
+    environments.
+
+    Args:
+        data: dict from ``_unpack_step_logs``.
+        plots_dir: Path to save the plot.
+        rho_key: key in ``data`` for the (T, E_subset) ρ array.
+        title: plot title string.
+        filename: output filename (e.g. ``"plot_5a_spearman_pre_frozen.png"``).
+    """
+    rho_per_env = data[rho_key]  # (T, E_subset)
     T = data["T"]
-    rho = data["spearman_rhos"]
     steps = np.arange(T)
-    valid = ~np.isnan(rho)
 
-    fig, ax = plt.subplots(figsize=(10, 4))
+    fig, ax = plt.subplots(figsize=(10, 5))
 
-    ax.plot(
-        steps[valid], rho[valid],
-        color="tab:green", lw=2, marker=".", markersize=4,
+    # Build box data: one list per step, dropping NaN entries
+    box_data = []
+    for t in range(T):
+        row = rho_per_env[t]
+        valid = row[~np.isnan(row)]
+        box_data.append(valid if len(valid) > 0 else [])
+
+    ax.boxplot(
+        box_data, positions=steps, widths=0.6,
+        patch_artist=True, showfliers=True,
+        boxprops={"facecolor": "lightblue", "alpha": 0.6},
+        medianprops={"color": "darkblue", "lw": 1.5},
+        whiskerprops={"color": "gray"},
+        capprops={"color": "gray"},
+        flierprops={"marker": ".", "markersize": 3, "alpha": 0.4,
+                    "markeredgewidth": 0},
     )
-    ax.axhline(0, color="gray", ls="--", lw=1, label=r"$\rho = 0$ (no correlation)")
+
+    # Overlay the mean ρ per step
+    mean_rho = np.nanmean(rho_per_env, axis=1)
+    ax.plot(steps, mean_rho, "o-", color="darkred", lw=2, markersize=4,
+            label="Mean ρ")
+
+    ax.axhline(0, color="gray", ls="--", lw=1, label=r"$\rho = 0$")
+    ax.set_ylim(-1.05, 1.05)
     ax.set_xlabel("Repo Step")
-    ax.set_ylabel(r"Spearman $\rho$")
-    ax.set_title("Affinity–Solve Rate Correlation Over Training")
+    ax.set_ylabel(r"Spearman $\rho$ per Environment")
+    ax.set_title(title)
     ax.legend(loc="lower right")
 
     _thin_ticks(ax, steps)
 
     plt.tight_layout()
-    fig.savefig(plots_dir / "plot_5_spearman.png", dpi=150, bbox_inches="tight")
+    fig.savefig(plots_dir / filename, dpi=150, bbox_inches="tight")
     plt.close(fig)
 
 
@@ -331,14 +409,20 @@ def _plot_spearman(data, plots_dir):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def generate_plots(step_logs: list, output_dir: Path) -> None:
-    """Generate all 5 diagnostic plots from step_logs and save to output_dir/plots/.
+    """Generate all 7 diagnostic plots from step_logs and save to output_dir/plots/.
 
     Plots produced:
         1. Policy Performance — per-policy mean solve rate & avg return
         2. Active Environments — stackplot of env counts per policy
         3. Assignment Certainty — box plot of CV (σ/μ) per candidate env
         4. Assignment Heatmap — env × step greedy-argmax assignment matrix
-        5. Spearman Correlation — affinity vs solve rate rank correlation
+        5a. Spearman ρ (Pre-Training Frozen) — per-env box plot
+        5b. Spearman ρ (Pre-Training Finetuned) — per-env box plot
+        5c. Spearman ρ (Post-Training Frozen) — per-env box plot
+
+    Each Spearman plot shows the distribution (across candidate environments)
+    of within-column rank correlation between affinity scores and solve rates,
+    avoiding cross-environment scale artifacts that plague pooled correlation.
 
     Args:
         step_logs: list of RepoStepLog namedtuples from a completed run.
@@ -360,9 +444,26 @@ def generate_plots(step_logs: list, output_dir: Path) -> None:
     _plot_active_envs(data, plots_dir, colors)
     _plot_certainty(data, plots_dir)
     _plot_assignment_heatmap(data, plots_dir, colors)
-    _plot_spearman(data, plots_dir)
+    _plot_per_env_spearman(
+        data, plots_dir,
+        rho_key="spearman_pre_frozen",
+        title="Affinity–Solve Rate Spearman ρ (Pre-Training Frozen)",
+        filename="plot_5a_spearman_pre_frozen.png",
+    )
+    _plot_per_env_spearman(
+        data, plots_dir,
+        rho_key="spearman_pre_finetune",
+        title="Affinity–Solve Rate Spearman ρ (Pre-Training Finetuned)",
+        filename="plot_5b_spearman_pre_finetune.png",
+    )
+    _plot_per_env_spearman(
+        data, plots_dir,
+        rho_key="spearman_post_frozen",
+        title="Affinity–Solve Rate Spearman ρ (Post-Training Frozen)",
+        filename="plot_5c_spearman_post_frozen.png",
+    )
 
-    print(f"Saved 5 plots to {plots_dir}")
+    print(f"Saved 7 plots to {plots_dir}")
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Environment observation visualization

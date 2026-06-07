@@ -35,8 +35,12 @@ class RepoStepLog(NamedTuple):
     candidate_env_indices: jnp.ndarray   # (E_subset,)
     affinity_scores: jnp.ndarray         # (P, E_subset)
     active_mask: jnp.ndarray             # (E_subset, P) binary
-    solve_rate: jnp.ndarray              # (P, E_subset), NaN where inactive
-    avg_return: jnp.ndarray              # (P, E_subset), NaN where inactive
+    solve_rate: jnp.ndarray              # (P, E_subset) post-training, unmasked
+    avg_return: jnp.ndarray              # (P, E_subset) post-training, unmasked
+    pre_frozen_solve_rate: jnp.ndarray   # (P, E_subset) pre-training frozen
+    pre_frozen_avg_return: jnp.ndarray   # (P, E_subset)
+    pre_finetune_solve_rate: jnp.ndarray # (P, E_subset) pre-training finetuned
+    pre_finetune_avg_return: jnp.ndarray # (P, E_subset)
 
 
 class PolicyRepo(ABC):
@@ -147,82 +151,82 @@ class PolicyRepo(ABC):
 
             return PolicyState(train_state, hstate)
         
-        def log_vids2wandb(self, candidate_env_indices, affinity, active_mask):
-            """Logs evaluation videos to wandb.
+        # def log_vids2wandb(self, candidate_env_indices, affinity, active_mask):
+        #     """Logs evaluation videos to wandb.
 
-            For each policy, selects the env with the highest affinity among those
-            active for that policy, and runs a frozen-policy rollout for video capture.
-            """
-            P = self.num_policies
-            # For each policy p, pick the active env with highest affinity
-            best_env_indices = []
-            for p in range(P):
-                # Mask out inactive envs for this policy
-                masked_aff = jnp.where(active_mask[:, p], affinity[p, :], -jnp.inf)
-                best_local_idx = jnp.argmax(masked_aff)
-                best_env_indices.append(candidate_env_indices[best_local_idx])
-            best_env_indices = jnp.array(best_env_indices)  # (P,)
+        #     For each policy, selects the env with the highest affinity among those
+        #     active for that policy, and runs a frozen-policy rollout for video capture.
+        #     """
+        #     P = self.num_policies
+        #     # For each policy p, pick the active env with highest affinity
+        #     best_env_indices = []
+        #     for p in range(P):
+        #         # Mask out inactive envs for this policy
+        #         masked_aff = jnp.where(active_mask[:, p], affinity[p, :], -jnp.inf)
+        #         best_local_idx = jnp.argmax(masked_aff)
+        #         best_env_indices.append(candidate_env_indices[best_local_idx])
+        #     best_env_indices = jnp.array(best_env_indices)  # (P,)
 
-            # One env per policy (single copy)
-            reset_states = jax.tree.map(lambda x: x[best_env_indices, 0], self.batched_train_env_reset_states)
-            env_state = reset_states
-            obs = jax.vmap(self.env.get_obs)(env_state.env_state)
+        #     # One env per policy (single copy)
+        #     reset_states = jax.tree.map(lambda x: x[best_env_indices, 0], self.batched_train_env_reset_states)
+        #     env_state = reset_states
+        #     obs = jax.vmap(self.env.get_obs)(env_state.env_state)
 
-            hstate = jax.tree.map(lambda x: x[:, 0], self.policy_repo.hstate)
-            params = self.policy_repo.train_state.params
+        #     hstate = jax.tree.map(lambda x: x[:, 0], self.policy_repo.hstate)
+        #     params = self.policy_repo.train_state.params
 
-            network_apply, env_step = self._make_eval_closures(P, render_pixels=True)
+        #     network_apply, env_step = self._make_eval_closures(P, render_pixels=True)
 
-            self.rng, rollout_rng = jax.random.split(self.rng)
-            video_frames = perform_generic_jitted_rollout(
-                network_apply, env_step, params, hstate, env_state, obs,
-                reset_states, rollout_rng, self.env_params.max_timesteps
-            )
+        #     self.rng, rollout_rng = jax.random.split(self.rng)
+        #     video_frames = perform_generic_jitted_rollout(
+        #         network_apply, env_step, params, hstate, env_state, obs,
+        #         reset_states, rollout_rng, self.env_params.max_timesteps
+        #     )
 
-            video_frames = np.array(video_frames)
-            data2log = {"repo_step": self.repo_step_counter}
+        #     video_frames = np.array(video_frames)
+        #     data2log = {"repo_step": self.repo_step_counter}
 
-            for i in range(P):
-                vid = frames_to_wandb_video(video_frames[:, i])
-                env_id = int(best_env_indices[i])
-                data2log[f"videos/policy_{i}_env_{env_id}"] = wandb.Video(vid, fps=15, format="gif")
+        #     for i in range(P):
+        #         vid = frames_to_wandb_video(video_frames[:, i])
+        #         env_id = int(best_env_indices[i])
+        #         data2log[f"videos/policy_{i}_env_{env_id}"] = wandb.Video(vid, fps=15, format="gif")
 
-            wandb.log(data2log)
+        #     wandb.log(data2log)
 
-        def log_step2wandb(self, candidate_env_indices, affinity, active_mask, perf_metrics):
-            """Logs per-step structured data to wandb.
+        # def log_step2wandb(self, candidate_env_indices, affinity, active_mask, perf_metrics):
+        #     """Logs per-step structured data to wandb.
 
-            Args:
-                candidate_env_indices: (E_subset,)
-                affinity: (P, E_subset)
-                active_mask: (E_subset, P)
-                perf_metrics: (P, E_subset, 2) — [solve_rate, avg_return], NaN where inactive.
-            """
-            data2log = {"repo_step": self.repo_step_counter}
-            P = self.num_policies
+        #     Args:
+        #         candidate_env_indices: (E_subset,)
+        #         affinity: (P, E_subset)
+        #         active_mask: (E_subset, P)
+        #         perf_metrics: (P, E_subset, 2) — [solve_rate, avg_return], NaN where inactive.
+        #     """
+        #     data2log = {"repo_step": self.repo_step_counter}
+        #     P = self.num_policies
 
-            solve_rate = perf_metrics[:, :, 0]  # (P, E_subset)
-            avg_return = perf_metrics[:, :, 1]  # (P, E_subset)
+        #     solve_rate = perf_metrics[:, :, 0]  # (P, E_subset)
+        #     avg_return = perf_metrics[:, :, 1]  # (P, E_subset)
 
-            for policy_idx in range(P):
-                # Per-policy metrics: mean over active envs only (ignoring NaN)
-                sr = solve_rate[policy_idx]
-                ar = avg_return[policy_idx]
-                active = active_mask[:, policy_idx]
-                active_sr = sr[active]
-                active_ar = ar[active]
+        #     for policy_idx in range(P):
+        #         # Per-policy metrics: mean over active envs only (ignoring NaN)
+        #         sr = solve_rate[policy_idx]
+        #         ar = avg_return[policy_idx]
+        #         active = active_mask[:, policy_idx]
+        #         active_sr = sr[active]
+        #         active_ar = ar[active]
 
-                mean_sr = np.nanmean(np.array(active_sr)) if len(active_sr) > 0 else 0.0
-                mean_ar = np.nanmean(np.array(active_ar)) if len(active_ar) > 0 else 0.0
-                num_active = int(jnp.sum(active))
+        #         mean_sr = np.nanmean(np.array(active_sr)) if len(active_sr) > 0 else 0.0
+        #         mean_ar = np.nanmean(np.array(active_ar)) if len(active_ar) > 0 else 0.0
+        #         num_active = int(jnp.sum(active))
 
-                data2log.update({
-                    f'ep_return/policy_{policy_idx}': mean_ar,
-                    f'solve_rate/policy_{policy_idx}': mean_sr,
-                    f'num_active_envs/policy_{policy_idx}': num_active,
-                })
+        #         data2log.update({
+        #             f'ep_return/policy_{policy_idx}': mean_ar,
+        #             f'solve_rate/policy_{policy_idx}': mean_sr,
+        #             f'num_active_envs/policy_{policy_idx}': num_active,
+        #         })
 
-            wandb.log(data2log)
+        #     wandb.log(data2log)
 
         def _make_eval_closures(self, n_pairs: int, render_pixels: bool = False):
             """Factory for (network_apply, env_step) closures used in frozen-policy rollouts.
@@ -338,7 +342,8 @@ class PolicyRepo(ABC):
 
         def advance(self):
             """Execute one repository step: sample candidates, compute affinity,
-            derive mask, train with masked PPO, evaluate frozen policy, log."""
+            derive mask, run pre-training diagnostics, train with masked PPO,
+            evaluate frozen policy, log."""
             # 1. Sample candidate environments (overridable by subclasses)
             candidate_env_indices = self.sample_candidate_envs()
 
@@ -351,26 +356,61 @@ class PolicyRepo(ABC):
             # 3. Derive binary active mask
             active_mask = self.derive_assignment_mask(affinity)
 
-            # 4. Masked PPO training
+            # ── 4. Pre-training diagnostics ───────────────────────────
+            P = self.num_policies
+            E_subset = candidate_env_indices.shape[0]
+            all_pairs = jnp.tile(candidate_env_indices[None, :], (P, 1))  # (P, E_subset)
+
+            # 4a. Pre-training frozen eval (always, cheap)
+            pre_frozen = self.evaluate_pairing(
+                all_pairs, self.train_env_reset_states,
+                rollout_steps=self.eval_rollout_steps,
+                params=self.policy_repo.train_state.params,
+                hstate=self.policy_repo.hstate,
+            )  # (P, E_subset, 2)
+
+            # 4b. Pre-training finetune eval (periodic, expensive)
+            freq = int(self.config.get("diagnostic_finetune_frequency", 1))
+            if self.repo_step_counter % freq == 0:
+                policy_indices = jnp.repeat(jnp.arange(P), E_subset)
+                env_indices = jnp.tile(candidate_env_indices, P)
+                pre_finetune = self._finetune_and_evaluate(
+                    policy_indices=policy_indices,
+                    env_indices=env_indices,
+                    env_states=self.train_env_reset_states,
+                    num_steps=int(self.config.get("pretrain_eval_finetune_steps", 20)),
+                    output_shape=(P, E_subset, 2),
+                )
+            else:
+                pre_finetune = jnp.full((P, E_subset, 2), jnp.nan)
+
+            # ── 5. Masked PPO training ────────────────────────────────
             batched_candidate_states = jax.tree.map(
                 lambda x: x[candidate_env_indices], self.batched_train_env_reset_states
             )
             policy_state = self.train(batched_candidate_states, active_mask)
             self.policy_repo = policy_state
 
-            # 5. Post-training frozen-policy evaluation
-            perf_metrics = self.evaluate_frozen_on_candidates(candidate_env_indices, active_mask)
+            # ── 6. Post-training frozen eval (all pairs, unmasked) ────
+            post_frozen = self.evaluate_pairing(
+                all_pairs, self.train_env_reset_states,
+                rollout_steps=self.eval_rollout_steps,
+                params=self.policy_repo.train_state.params,
+                hstate=self.policy_repo.hstate,
+            )  # (P, E_subset, 2)
 
-            # 6. Store structured log + allow subclass hooks
-            self.append_step_log(candidate_env_indices, affinity, active_mask, perf_metrics)
-            self.update(policy_state, candidate_env_indices, affinity, active_mask, perf_metrics)
+            # ── 7. Store structured log + allow subclass hooks ────────
+            self.append_step_log(candidate_env_indices, affinity, active_mask,
+                                 post_frozen, pre_frozen, pre_finetune)
+            self.update(policy_state, candidate_env_indices, affinity,
+                        active_mask, post_frozen)
 
-            # 7. WandB logging
-            if self.config['use_wandb']:
-                self.log_step2wandb(candidate_env_indices, affinity, active_mask, perf_metrics)
-                video_logging_freq = self.config.get('video_frequency', None)
-                if video_logging_freq is not None and self.repo_step_counter % video_logging_freq == 0:
-                    self.log_vids2wandb(candidate_env_indices, affinity, active_mask)
+            # ── 8. WandB logging ──────────────────────────────────────
+            # if self.config['use_wandb']:
+            #     self.log_step2wandb(candidate_env_indices, affinity, active_mask, perf_metrics)
+            #     video_logging_freq = self.config.get('video_frequency', None)
+            #     if video_logging_freq is not None and self.repo_step_counter % video_logging_freq == 0:
+            #         self.log_vids2wandb(candidate_env_indices, affinity, active_mask)
 
             self.repo_step_counter += 1
 
@@ -462,35 +502,20 @@ class PolicyRepo(ABC):
 
             return mask
 
-        def evaluate_frozen_on_candidates(self, candidate_env_indices, active_mask):
-            """Runs a short frozen-policy rollout on all P × E_subset pairs.
-
-            Returns:
-                (P, E_subset, 2) array with [solve_rate, avg_return].
-                Entries are NaN where active_mask[e, p] == 0.
-            """
-            E_subset = candidate_env_indices.shape[0]
-            all_pairs = jnp.tile(candidate_env_indices[None, :], (self.num_policies, 1))  # (P, E_subset)
-            results = self.evaluate_pairing(all_pairs, self.train_env_reset_states,
-                                            rollout_steps=self.eval_rollout_steps,
-                                            params=self.policy_repo.train_state.params,
-                                            hstate=self.policy_repo.hstate)  # (P, E_subset, 2)
-
-            # Mask inactive pairs with NaN
-            mask_expanded = active_mask.T[:, :, None]  # (P, E_subset, 1)
-            results = jnp.where(mask_expanded, results, jnp.nan)
-            return results
-
-        def append_step_log(self, candidate_env_indices, affinity, active_mask, perf_metrics):
+        def append_step_log(self, candidate_env_indices, affinity, active_mask,
+                             post_frozen_metrics, pre_frozen_metrics,
+                             pre_finetune_metrics):
             """Appends a RepoStepLog to self.step_logs."""
-            solve_rate = perf_metrics[:, :, 0]
-            avg_return = perf_metrics[:, :, 1]
             self.step_logs.append(RepoStepLog(
                 candidate_env_indices=candidate_env_indices,
                 affinity_scores=affinity,
                 active_mask=active_mask,
-                solve_rate=solve_rate,
-                avg_return=avg_return,
+                solve_rate=post_frozen_metrics[:, :, 0],
+                avg_return=post_frozen_metrics[:, :, 1],
+                pre_frozen_solve_rate=pre_frozen_metrics[:, :, 0],
+                pre_frozen_avg_return=pre_frozen_metrics[:, :, 1],
+                pre_finetune_solve_rate=pre_finetune_metrics[:, :, 0],
+                pre_finetune_avg_return=pre_finetune_metrics[:, :, 1],
             ))
 
         def evaluate_frozen(self, eval_env_reset_states) -> tuple[jax.Array, jax.Array, jax.Array]:
@@ -513,6 +538,84 @@ class PolicyRepo(ABC):
                                                   hstate=self.policy_repo.hstate)
             return affinity, env2policy, eval_metrics
 
+        def _finetune_and_evaluate(self, policy_indices, env_indices,
+                                    env_states, num_steps, output_shape):
+            """Fine-tune each policy on its assigned env, then evaluate.
+
+            Core fine-tuning loop shared by ``evaluate_finetune`` and per-step
+            diagnostic evaluations.  Creates N pseudo-policies, fine-tunes each
+            on C copies of its assigned environment for ``num_steps`` PPO steps,
+            then evaluates with identity pairing.
+
+            Args:
+                policy_indices: (N,) int — which original policy to copy for
+                    each pseudo-policy.
+                env_indices: (N,) int — which env (index into ``env_states``)
+                    each pseudo-policy trains/evaluates on.
+                env_states: pytree with leading dim >= max(env_indices).
+                num_steps: number of PPO update steps for fine-tuning.
+                output_shape: shape to reshape final (N, 2) metrics into.
+
+            Returns:
+                Metrics array reshaped to ``output_shape``.
+            """
+            N = policy_indices.shape[0]
+            C = self.num_copies_per_env
+
+            # Copy params for all N pseudo-policies
+            ft_params = jax.tree.map(
+                lambda x: x[policy_indices], self.policy_repo.train_state.params
+            )
+            ft_opt_state = jax.tree.map(
+                lambda x: x[policy_indices], self.policy_repo.train_state.opt_state
+            )
+            ft_step = self.policy_repo.train_state.step[policy_indices]
+            ft_hstate = jax.tree.map(
+                lambda x: x[policy_indices], self.policy_repo.hstate
+            )
+
+            ft_train_state = TrainState(
+                step=ft_step,
+                apply_fn=self.policy_repo.train_state.apply_fn,
+                params=ft_params,
+                tx=self.policy_repo.train_state.tx,
+                opt_state=ft_opt_state,
+            )
+
+            # Select envs and duplicate: (N, C, ...)
+            selected_envs = jax.tree.map(
+                lambda x: x[env_indices], env_states
+            )
+            batched_envs = duplicate_env_states(selected_envs, C)
+            obs = jax.vmap(jax.vmap(self.env.get_obs))(batched_envs.env_state)
+
+            # Fine-tuning loop (no mask — each pseudo-policy trains fully)
+            for _ in range(num_steps):
+                self.rng, rollout_rng, update_rng = jax.random.split(self.rng, 3)
+                rollout_rngs = jax.random.split(rollout_rng, N)
+                update_rngs = jax.random.split(update_rng, N)
+
+                ft_train_state, ft_hstate, obs, batched_envs, _, _ = self.ppo_step(
+                    ft_train_state,
+                    ft_hstate,
+                    obs,
+                    batched_envs,
+                    rollout_rngs,
+                    update_rngs,
+                    batched_envs,  # reset_state_override: auto-reset to the same envs
+                )
+
+            # Identity evaluation: pseudo-policy i → selected env i
+            metrics = self.evaluate_pairing(
+                jnp.arange(N),
+                selected_envs,
+                rollout_steps=self.eval_rollout_steps,
+                params=ft_train_state.params,
+                hstate=ft_hstate,
+            )  # (N, 2)
+
+            return metrics.reshape(output_shape)
+
         def evaluate_finetune(self, eval_env_reset_states) -> tuple[jax.Array, jax.Array, jax.Array]:
             """Evaluates with per-env policy fine-tuning before rollout.
 
@@ -520,10 +623,6 @@ class PolicyRepo(ABC):
             then a temporary copy of that policy is fine-tuned on that environment
             for ``evaluate_finetune_steps`` PPO steps before evaluation.
             The fine-tuned parameters are discarded — the repository is unchanged.
-
-            All E_eval fine-tuning runs are batched into a single ``ppo_step``
-            call per iteration: E_eval pseudo-policies, each with C env copies
-            of its assigned environment, fully vmapped with no mask needed.
 
             Args:
                 eval_env_reset_states: pytree of evaluation env reset states.
@@ -536,66 +635,19 @@ class PolicyRepo(ABC):
                   for each eval env under its fine-tuned assigned policy.
             """
             num_steps = int(self.config.get("evaluate_finetune_steps", 5))
-            C = self.num_copies_per_env
-
-            # 1. Affinity and assignment (same as evaluate_frozen)
             affinity = self.compute_affinity(eval_env_reset_states)
             env2policy = jnp.argmax(affinity, axis=0)  # (E_eval,)
             E_eval = env2policy.shape[0]
 
-            # 2. Copy params for all E_eval pseudo-policies at once
-            ft_params = jax.tree.map(
-                lambda x: x[env2policy], self.policy_repo.train_state.params
-            )  # (E_eval, ...)
-            ft_opt_state = jax.tree.map(
-                lambda x: x[env2policy], self.policy_repo.train_state.opt_state
-            )
-            ft_step = self.policy_repo.train_state.step[env2policy]
-            ft_hstate = jax.tree.map(
-                lambda x: x[env2policy], self.policy_repo.hstate
-            )  # (E_eval, hstate_dim)
-
-            ft_train_state = TrainState(
-                step=ft_step,
-                apply_fn=self.policy_repo.train_state.apply_fn,
-                params=ft_params,
-                tx=self.policy_repo.train_state.tx,
-                opt_state=ft_opt_state,
+            metrics = self._finetune_and_evaluate(
+                policy_indices=env2policy,
+                env_indices=jnp.arange(E_eval),
+                env_states=eval_env_reset_states,
+                num_steps=num_steps,
+                output_shape=(E_eval, 2),
             )
 
-            # 3. Prepare per-pseudo-policy env states: (E_eval, C, ...)
-            #    Pseudo-policy e gets C copies of eval env e.
-            batched_envs = duplicate_env_states(eval_env_reset_states, C)
-            obs = jax.vmap(jax.vmap(self.env.get_obs))(batched_envs.env_state)
-            # obs shape: (E_eval, C, ...)
-
-            # 4. Fine-tuning: one ppo_step call per iteration, vmapped over E_eval
-            #    No mask needed — every pseudo-policy trains on all C of its env copies.
-            for _ in range(num_steps):
-                self.rng, rollout_rng, update_rng = jax.random.split(self.rng, 3)
-                rollout_rngs = jax.random.split(rollout_rng, E_eval)
-                update_rngs = jax.random.split(update_rng, E_eval)
-
-                ft_train_state, ft_hstate, obs, batched_envs, _, _ = self.ppo_step(
-                    ft_train_state,
-                    ft_hstate,
-                    obs,
-                    batched_envs,
-                    rollout_rngs,
-                    update_rngs,
-                    batched_envs,  # reset_state_override: auto-reset to the same envs
-                )
-
-            # 5. Batched evaluation: identity pairing — pseudo-policy e → env e
-            finetuned_metrics = self.evaluate_pairing(
-                jnp.arange(E_eval),
-                eval_env_reset_states,
-                rollout_steps=self.eval_rollout_steps,
-                params=ft_train_state.params,
-                hstate=ft_hstate,
-            )  # (E_eval, 2)
-
-            return affinity, env2policy, finetuned_metrics
+            return affinity, env2policy, metrics
 
         # ── Hook (non-abstract, overridable) ─────────────────────────────────
 
