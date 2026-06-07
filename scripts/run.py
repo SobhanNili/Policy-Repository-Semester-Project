@@ -34,6 +34,7 @@ import jax.numpy as jnp
 import jax.random as jr
 import numpy as np
 from tqdm.auto import tqdm
+from loguru import logger
 
 import wandb  # noqa: E402
 
@@ -246,7 +247,7 @@ def setup_wandb(config: dict) -> None:
     if not config.get("use_wandb", False):
         return
     wandb.init(
-        project="Naive Skill Repo",
+        project="Policy Repo",
         config=dict(config),
         name=config.get("wandb_runname", None),
     )
@@ -293,7 +294,7 @@ def main(argv: list[str] | None = None) -> None:
     script_dir = Path(__file__).resolve().parent
     config_dir = script_dir.parent / "configs"
     if not config_dir.exists():
-        print(f"ERROR: Config directory not found: {config_dir}", file=sys.stderr)
+        logger.error(f"ERROR: Config directory not found: {config_dir}")
         sys.exit(1)
 
     # Build Hydra overrides: repo selection + any CLI key=value pairs
@@ -303,30 +304,30 @@ def main(argv: list[str] | None = None) -> None:
     config = load_config(str(config_dir), args.config_name, overrides=overrides)
     if args.seed is not None:
         config["seed"] = args.seed
-    print(f"Loaded config '{args.config_name}' from {config_dir}")
-    print(f"  Repo: {repo_type}")
+    logger.info(f"Loaded config '{args.config_name}' from {config_dir}")
+    logger.info(f"  Repo: {repo_type}")
 
     # ── Extract repo-specific kwargs from flattened config ──────────────────
     repo_cls, kwargs_keys = REPO_REGISTRY[repo_type]
     repo_kwargs = _extract_repo_kwargs(config, kwargs_keys, repo_type)
-    print(f"  Repo kwargs: {repo_kwargs}")
+    logger.info(f"  Repo kwargs: {repo_kwargs}")
 
     # ── Output directory ────────────────────────────────────────────────────
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     run_dir = Path(args.output_dir) / f"{repo_type}_{timestamp}"
     run_dir.mkdir(parents=True, exist_ok=False)
-    print(f"Output directory: {run_dir}")
+    logger.info(f"Output directory: {run_dir}")
 
     # ── WandB setup ─────────────────────────────────────────────────────────
     setup_wandb(config)
 
     # ── RNG ─────────────────────────────────────────────────────────────────
     rng = jr.PRNGKey(config["seed"])
-    print(f"JAX devices: {jax.devices()}")
+    logger.info(f"JAX devices: {jax.devices()}")
 
     # ── Environment creation ────────────────────────────────────────────────
     env, env_params, static_env_params, train_env_reset_states, eval_env_reset_states, rng = setup_environments(config, rng)
-    print(
+    logger.info(
         f"Created {config['num_train_envs']} training environments "
         f"(mode: {config['train_level_mode']})"
     )
@@ -338,19 +339,28 @@ def main(argv: list[str] | None = None) -> None:
                           run_dir, folder="eval_env_observations")
 
     # ── Repo initialization ─────────────────────────────────────────────────
-    print(f"Initializing {repo_type} repo with kwargs: {repo_kwargs}")
-    policy_repo = repo_cls(config, train_env_reset_states, rng, **repo_kwargs)
+    from apa.repo import PolicyRepo
+    logger.info(f"Initializing {repo_type} repo with kwargs: {repo_kwargs}")
+    policy_repo: PolicyRepo = repo_cls(config, train_env_reset_states, rng, **repo_kwargs)
 
     # ── Training loop ───────────────────────────────────────────────────────
     num_repo_updates = int(config["num_repo_updates"])
-    print(f"Starting training: {num_repo_updates} repo updates...")
+    logger.info(f"Starting training: {num_repo_updates} repo updates...")
     for _ in tqdm(range(num_repo_updates), desc="Repo updates"):
         policy_repo.advance()
-    print(f"Training complete. {len(policy_repo.step_logs)} steps logged.")
+    logger.info(f"Training complete. {len(policy_repo.step_logs)} steps logged.")
+
+    # ── Evaluation step ───────────────────────────────────────────────────────
+    logger.info("Starting evaluation...")   
+    eval_results = policy_repo.evaluate_finetune(eval_env_reset_states)
+    logger.info("Evaluation complete.")
 
     # ── Save outputs ────────────────────────────────────────────────────────
     with open(run_dir / "step_logs.pkl", "wb") as f:
         pickle.dump(policy_repo.step_logs, f)
+
+    with open(run_dir / "eval_results.pkl", "wb") as f:
+        pickle.dump(eval_results, f)
 
     with open(run_dir / "config.json", "w") as f:
         json.dump(_sanitize_config(config), f, indent=2, default=str)
@@ -358,22 +368,22 @@ def main(argv: list[str] | None = None) -> None:
     with open(run_dir / "repo_kwargs.json", "w") as f:
         json.dump(repo_kwargs, f, indent=2, default=str)
 
-    print(f"Saved step_logs.pkl, config.json, repo_kwargs.json to {run_dir}")
+    logger.info(f"Saved step_logs.pkl, config.json, repo_kwargs.json to {run_dir}")
 
     # ── Generate plots ──────────────────────────────────────────────────────
     if not args.skip_plots:
         if len(policy_repo.step_logs) > 0:
             generate_plots(policy_repo.step_logs, run_dir)
         else:
-            print("Warning: No step_logs collected — skipping plots.")
+            logger.warning("Warning: No step_logs collected — skipping plots.")
     else:
-        print("Plots skipped (--skip-plots).")
+        logger.info("Plots skipped (--skip-plots).")
 
     # ── Cleanup ─────────────────────────────────────────────────────────────
     if config.get("use_wandb", False):
         wandb.finish()
 
-    print(f"Done. All outputs in {run_dir}")
+    logger.info(f"Done. All outputs in {run_dir}")
 
 
 if __name__ == "__main__":
