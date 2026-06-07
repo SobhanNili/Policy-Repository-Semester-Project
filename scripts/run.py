@@ -17,7 +17,9 @@ Each run creates a timestamped output directory containing:
     - step_logs.pkl      : list of RepoStepLog namedtuples
     - config.json         : resolved configuration dict (from Hydra)
     - repo_kwargs.json    : repo-specific constructor kwargs used for this run
-    - plots/              : 5 diagnostic PNG plots
+    - eval_frozen.csv     : per-env solve rate & avg return (frozen)
+    - eval_finetune.csv    : per-env solve rate & avg return (finetuned)
+    - plots/              : 7 diagnostic PNG plots
 """
 
 import argparse
@@ -33,6 +35,7 @@ import jax
 import jax.numpy as jnp
 import jax.random as jr
 import numpy as np
+import pandas as pd
 from tqdm.auto import tqdm
 from loguru import logger
 
@@ -266,6 +269,38 @@ def setup_wandb(config: dict) -> None:
 # ──────────────────────────────────────────────────────────────────────────────
 
 
+def _save_eval_csv(metrics, filepath: Path, label: str = "env") -> None:
+    """Save evaluation metrics as CSV with mean/std summary rows.
+
+    Args:
+        metrics: (E, 2) array with [solve_rate, avg_return] per environment.
+        filepath: path to save the CSV.
+        label: name for the index column (default ``"env"``).
+    """
+    metrics_np = np.array(metrics)
+    E = metrics_np.shape[0]
+
+    df = pd.DataFrame(metrics_np, columns=["solve_rate", "avg_return"])
+    df.index.name = label
+
+    summary = pd.DataFrame({
+        "solve_rate": [df["solve_rate"].mean(), df["solve_rate"].std()],
+        "avg_return": [df["avg_return"].mean(), df["avg_return"].std()],
+    }, index=["mean", "std"])
+    summary.index.name = label
+
+    result = pd.concat([summary, df])
+    result.to_csv(filepath, float_format="%.6f")
+
+    logger.info(
+        f"Saved {E} env metrics to {filepath}  "
+        f"(solve_rate: {result.loc['mean', 'solve_rate']:.3f}"
+        f"±{result.loc['std', 'solve_rate']:.3f}, "
+        f"avg_return: {result.loc['mean', 'avg_return']:.3f}"
+        f"±{result.loc['std', 'avg_return']:.3f})"
+    )
+
+
 def _sanitize_config(config: dict) -> dict:
     """Convert config values to JSON-serializable types."""
     out: dict[str, Any] = {}
@@ -350,17 +385,30 @@ def main(argv: list[str] | None = None) -> None:
         policy_repo.advance()
     logger.info(f"Training complete. {len(policy_repo.step_logs)} steps logged.")
 
-    # ── Evaluation step ───────────────────────────────────────────────────────
-    logger.info("Starting evaluation...")   
-    eval_results = policy_repo.evaluate_finetune(eval_env_reset_states)
+    # ── Evaluation step ───────────────────────────────────────────────────
+    logger.info("Starting evaluation...")
+
+    # Frozen evaluation (greedy assignment, no fine-tuning)
+    frozen_affinity, frozen_env2policy, frozen_metrics = \
+        policy_repo.evaluate_frozen(eval_env_reset_states)
+    _save_eval_csv(frozen_metrics, run_dir / "eval_frozen.csv")
+
+    # Finetuned evaluation (greedy assignment + per-env fine-tuning)
+    finetune_affinity, finetune_env2policy, finetune_metrics = \
+        policy_repo.evaluate_finetune(eval_env_reset_states)
+    _save_eval_csv(finetune_metrics, run_dir / "eval_finetune.csv")
+
     logger.info("Evaluation complete.")
 
-    # ── Save outputs ────────────────────────────────────────────────────────
+    # ── Save outputs ──────────────────────────────────────────────────────
     with open(run_dir / "step_logs.pkl", "wb") as f:
         pickle.dump(policy_repo.step_logs, f)
 
-    with open(run_dir / "eval_results.pkl", "wb") as f:
-        pickle.dump(eval_results, f)
+    with open(run_dir / "eval_frozen_results.pkl", "wb") as f:
+        pickle.dump((frozen_affinity, frozen_env2policy, frozen_metrics), f)
+
+    with open(run_dir / "eval_finetune_results.pkl", "wb") as f:
+        pickle.dump((finetune_affinity, finetune_env2policy, finetune_metrics), f)
 
     with open(run_dir / "config.json", "w") as f:
         json.dump(_sanitize_config(config), f, indent=2, default=str)
