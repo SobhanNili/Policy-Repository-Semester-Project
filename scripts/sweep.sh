@@ -1,0 +1,18 @@
+#!/bin/bash
+
+export CUDA_VISIBLE_DEVICES=2
+
+python scripts/run.py --repo dino --sigma 0.3
+python scripts/run.py --repo dino --sigma 0.5
+python scripts/run.py --repo dino --sigma 0.7
+
+python scripts/run.py --repo morphology --sigma 0.15
+python scripts/run.py --repo morphology --sigma 0.3
+python scripts/run.py --repo morphology --sigma 0.5
+
+python scripts/run.py --repo policy_latent --sigma 0.3
+python scripts/run.py --repo policy_latent --sigma 0.5
+python scripts/run.py --repo policy_latent --sigma 0.7
+
+python scripts/run.py --repo performance
+python scripts/run.py --repo random

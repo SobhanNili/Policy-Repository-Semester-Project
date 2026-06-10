@@ -29,6 +29,7 @@ from flax.serialization import to_state_dict
 from hydra import compose, initialize_config_dir
 from kinetix.util import generate_params_from_config, normalise_config, save_model
 from omegaconf import OmegaConf
+from loguru import logger
 
 # ── Load make_train from kinetix's experiments/ppo.py ────────────────────────
 # experiments/ is *not* a subpackage of kinetix, so we use importlib instead.
@@ -100,7 +101,7 @@ def main() -> None:
             cfg,
             save_to_wandb=cfg.get("use_wandb", False),
         )
-        print(f"Checkpoint saved under: {cfg['save_path']}")
+        logger.info(f"Checkpoint saved under: {cfg['save_path']}")
 
 
 if __name__ == "__main__":

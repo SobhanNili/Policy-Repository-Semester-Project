@@ -33,12 +33,12 @@ num_copies_per_env: 4         # parallel copies per distinct env;
                               #   total batch per policy = candidate_pool_size × num_copies_per_env
 
 # ── Training budget ──────────────────────────────────────────────────────────
-num_updates: 200              # PPO update steps per repository iteration (inner loop)
-num_repo_updates: 10          # number of repository steps (outer loop over advance())
+num_updates: 150              # PPO update steps per repository iteration (inner loop)
+num_repo_updates: 50          # number of repository steps (outer loop over advance())
 
 # ── Repository structure ─────────────────────────────────────────────────────
 num_policies: 4               # fixed number of policy networks in the repository
-candidate_pool_size: 5        # distinct envs randomly sampled per repo step;
+candidate_pool_size: 6        # distinct envs randomly sampled per repo step;
                               #   must satisfy (candidate_pool_size × num_copies_per_env) % num_minibatches == 0
 
 # ── Evaluation ───────────────────────────────────────────────────────────────
@@ -49,7 +49,7 @@ evaluate_finetune_steps: 100    # PPO steps for per-env fine-tuning in evaluate_
 pretrain_eval_finetune_steps: 20  # PPO steps for per-step diagnostic fine-tuning
                               #   (separate from evaluate_finetune_steps). A lighter
                               #   budget suffices to reveal policy differentiation.
-diagnostic_finetune_frequency: 1  # Run diagnostic fine-tuning every N repo steps.
+diagnostic_finetune_frequency: 2  # Run diagnostic fine-tuning every N repo steps.
                               #   1 = every step; higher values reduce overhead.
 
 # ── Assignment ───────────────────────────────────────────────────────────────
