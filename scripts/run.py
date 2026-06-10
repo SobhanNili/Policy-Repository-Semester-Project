@@ -112,8 +112,8 @@ def parse_args(argv: list[str] | None = None) -> tuple[argparse.Namespace, list[
         help="Random seed (default: from config).",
     )
     parser.add_argument(
-        "--output_dir", default="outputs",
-        help="Parent directory for run outputs (default: outputs).",
+        "--output_dir", default="outputs/experiments",
+        help="Parent directory for run outputs (default: outputs/experiments).",
     )
     # --config_name is hidden; most users should use the default config.yaml
     parser.add_argument(
@@ -339,6 +339,7 @@ def main(argv: list[str] | None = None) -> None:
     config = load_config(str(config_dir), args.config_name, overrides=overrides)
     if args.seed is not None:
         config["seed"] = args.seed
+    config["repo_type"] = repo_type  # saved to config.json for cross-experiment comparison
     logger.info(f"Loaded config '{args.config_name}' from {config_dir}")
     logger.info(f"  Repo: {repo_type}")
 
