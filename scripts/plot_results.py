@@ -4,7 +4,7 @@
 Usage:
     python scripts/plot_results.py outputs/dino_matching_2026-06-06_09-17-04/
 
-Loads ``step_logs.pkl`` from the given run directory, generates all 5
+Loads ``step_logs.pkl`` from the given run directory, generates all
 diagnostic plots, and saves them to ``<run_dir>/plots/``.  Any existing
 ``plots/`` directory is deleted first, so re-running with updated plotting
 code cleanly replaces old plots.
@@ -22,6 +22,7 @@ import pickle
 import shutil
 import sys
 from pathlib import Path
+from loguru import logger
 
 from apa.utils.analysis import generate_plots
 
@@ -45,25 +46,24 @@ def main() -> None:
 
     pkl_path = run_dir / "step_logs.pkl"
     if not pkl_path.exists():
-        print(f"Error: {pkl_path} not found — not a valid run directory?",
-              file=sys.stderr)
+        logger.error(f"Error: {pkl_path} not found — not a valid run directory?")
         sys.exit(1)
 
     # ── Load saved data ────────────────────────────────────────────────────
-    print(f"Loading step_logs from {pkl_path} ...")
+    logger.info(f"Loading step_logs from {pkl_path} ...")
     with open(pkl_path, "rb") as f:
         step_logs = pickle.load(f)
-    print(f"Loaded {len(step_logs)} step logs.")
+    logger.info(f"Loaded {len(step_logs)} step logs.")
 
     # ── Remove old plots for a clean slate ──────────────────────────────────
     plots_dir = run_dir / "plots"
     if plots_dir.exists():
-        print(f"Removing existing plots/ directory ...")
+        logger.info(f"Removing existing plots/ directory ...")
         shutil.rmtree(plots_dir)
 
     # ── Generate fresh plots ───────────────────────────────────────────────
     generate_plots(step_logs, run_dir)
-    print("Done.")
+    logger.info("Done.")
 
 
 if __name__ == "__main__":

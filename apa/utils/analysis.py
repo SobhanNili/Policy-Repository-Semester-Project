@@ -4,14 +4,15 @@ This module is the single source of truth for diagnostic plotting logic.
 It is used by both ``scripts/run.py`` (during training) and
 ``scripts/plot_results.py`` (standalone post-hoc analysis).
 
-Generates 7 diagnostic plots:
-    1. Policy Performance (per-policy mean solve rate & avg return over steps)
-    2. Active Environments per Policy (stackplot)
-    3. Assignment Certainty (CV = σ/μ per env, box plot per step)
-    4. Greedy Assignment Heatmap (env × step, colored by assigned policy)
-    5a. Affinity–Solve Rate Spearman ρ (Pre-Training Frozen)
-    5b. Affinity–Solve Rate Spearman ρ (Pre-Training Finetuned)
-    5c. Affinity–Solve Rate Spearman ρ (Post-Training Frozen)
+Generates the following diagnostic plots:
+    - Policy Performance (per-policy mean solve rate & avg return over steps)
+    - Active Environments per Policy (stackplot)
+    - Assignment Certainty — CV (σ/μ per env, box plot per step)
+    - Assignment Certainty — Normalized Margin (box plot per step)
+    - Greedy Assignment Heatmap (env × step, colored by assigned policy)
+    - Affinity–Solve Rate Spearman ρ (Pre-Training Frozen)
+    - Affinity–Solve Rate Spearman ρ (Pre-Training Finetuned)
+    - Affinity–Solve Rate Spearman ρ (Post-Training Frozen)
 """
 
 import matplotlib
@@ -45,6 +46,7 @@ def _unpack_step_logs(step_logs: list) -> dict:
         mean_avg_return  (T, P)  — mean over active envs only
         n_active_envs    (T, P)  — count of active envs
         cv_per_env       (T, E_subset)  — σ_p / μ_p per candidate env
+        score_margin_per_env  (T, E_subset)  — normalized top-2 margin per env
         spearman_pre_frozen    (T, E_subset)  — per-env ρ, pre-training frozen
         spearman_pre_finetune  (T, E_subset)  — per-env ρ, pre-training finetuned
         spearman_post_frozen   (T, E_subset)  — per-env ρ, post-training frozen
@@ -107,6 +109,19 @@ def _unpack_step_logs(step_logs: list) -> dict:
     std_p  = affinities.std(axis=1)    # (T, E_subset)
     cv_per_env = std_p / (mean_p + 1e-8)
 
+    # ── Normalized margin per env: (s_0 - s_1) / (s_0 - s_{P-1}) ───────
+    # Measures how decisively the best policy dominates each environment.
+    #  0 ≈ all policies equally scored (contested env)
+    #  1 ≈ one policy clearly stands out (confident assignment).
+    sorted_aff = np.sort(affinities, axis=1)  # (T, P, E_subset), ascending
+    score_range = sorted_aff[:, -1, :] - sorted_aff[:, 0, :]  # (T, E_subset)
+    top2_gap = sorted_aff[:, -1, :] - sorted_aff[:, -2, :]     # (T, E_subset)
+    score_margin_per_env = np.divide(
+        top2_gap, score_range,
+        out=np.zeros_like(top2_gap),
+        where=(score_range > 1e-12),
+    )  # (T, E_subset)
+
     # ── Per-environment Spearman ρ (affinity vs solve rate per column) ───
     spearman_pre_frozen = _compute_per_env_spearman(
         affinities, pre_frozen_solve_rates, T, P, E_subset
@@ -141,6 +156,7 @@ def _unpack_step_logs(step_logs: list) -> dict:
         "mean_avg_return": mean_avg_return,
         "n_active_envs": n_active_envs,
         "cv_per_env": cv_per_env,
+        "score_margin_per_env": score_margin_per_env,
         "spearman_pre_frozen": spearman_pre_frozen,
         "spearman_pre_finetune": spearman_pre_finetune,
         "spearman_post_frozen": spearman_post_frozen,
@@ -194,7 +210,7 @@ def _thin_ticks(ax, steps, max_ticks: int = 15):
 
 
 def _plot_performance(data, plots_dir, colors):
-    """Plot 1: per-policy mean solve rate and avg return over steps."""
+    """Per-policy mean solve rate and avg return over steps."""
     T, P = data["T"], data["P"]
     steps = np.arange(T)
 
@@ -222,12 +238,12 @@ def _plot_performance(data, plots_dir, colors):
     ax2.legend(ncol=P, loc="lower right")
 
     plt.tight_layout()
-    fig.savefig(plots_dir / "plot_1_performance.png", dpi=150, bbox_inches="tight")
+    fig.savefig(plots_dir / "performance.png", dpi=150, bbox_inches="tight")
     plt.close(fig)
 
 
 def _plot_active_envs(data, plots_dir, colors):
-    """Plot 2: stackplot of active environment counts per policy."""
+    """Stackplot of active environment counts per policy."""
     T, P = data["T"], data["P"]
     steps = np.arange(T)
 
@@ -245,12 +261,12 @@ def _plot_active_envs(data, plots_dir, colors):
     ax.set_xlim(0, T - 1)
 
     plt.tight_layout()
-    fig.savefig(plots_dir / "plot_2_active_envs.png", dpi=150, bbox_inches="tight")
+    fig.savefig(plots_dir / "active_envs.png", dpi=150, bbox_inches="tight")
     plt.close(fig)
 
 
 def _plot_certainty(data, plots_dir):
-    """Plot 3: box plot of per-environment CV (σ/μ) at each repo step.
+    """Box plot of per-environment CV (σ/μ) at each repo step.
 
     Each box shows the distribution of CV across the E_subset candidate
     environments for that step.  A rising trend indicates that affinity
@@ -287,12 +303,64 @@ def _plot_certainty(data, plots_dir):
     _thin_ticks(ax, steps)
 
     plt.tight_layout()
-    fig.savefig(plots_dir / "plot_3_certainty.png", dpi=150, bbox_inches="tight")
+    fig.savefig(plots_dir / "certainty_cv.png", dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
+def _plot_score_margin(data, plots_dir):
+    """Box plot of per-environment Normalized Margin at each repo step.
+
+    Each box shows the distribution of the normalized top-2 margin across the
+    E_subset candidate environments for that step.
+
+    - 0   = all policies score the environment equally (contested).
+    - 1   = one policy clearly dominates (confident assignment).
+
+    A rising trend indicates that policies are developing more decisive
+    preferences — one policy stands out per environment.
+
+    The Normalized Margin is scale-invariant, unlike CV, making it comparable
+    across different affinity-scoring methods (RBF, rank-based, etc.).
+    """
+    margin = data["score_margin_per_env"]  # (T, E_subset)
+    T = data["T"]
+    steps = np.arange(T)
+
+    fig, ax = plt.subplots(figsize=(10, 5))
+
+    box_data = [margin[t] for t in range(T)]
+    ax.boxplot(
+        box_data, positions=steps, widths=0.6,
+        patch_artist=True, showfliers=True,
+        boxprops={"facecolor": "lightgreen", "alpha": 0.6},
+        medianprops={"color": "darkgreen", "lw": 1.5},
+        whiskerprops={"color": "gray"},
+        capprops={"color": "gray"},
+        flierprops={"marker": ".", "markersize": 3, "alpha": 0.4,
+                    "markeredgewidth": 0},
+    )
+
+    # Overlay the mean margin per step
+    mean_margin = np.nanmean(margin, axis=1)
+    ax.plot(steps, mean_margin, "o-", color="darkred", lw=2, markersize=4,
+            label="Mean Normalized Margin")
+
+    ax.set_xlabel("Repo Step")
+    ax.set_ylabel("Normalized Margin per Environment")
+    ax.set_title(r"Policy Dominance — Normalized Top-2 Margin  $(s_0 - s_1)\,/\,(s_0 - s_{P-1})$  Over Training")
+    ax.set_ylim(-0.05, 1.05)
+    ax.legend(loc="lower right")
+
+    _thin_ticks(ax, steps)
+
+    plt.tight_layout()
+    fig.savefig(plots_dir / "certainty_normalized_margin.png", dpi=150,
+                bbox_inches="tight")
     plt.close(fig)
 
 
 def _plot_assignment_heatmap(data, plots_dir, colors):
-    """Plot 4: env × step heatmap of greedy argmax assignments.
+    """Env × step heatmap of greedy argmax assignments.
 
     Rows = individual training environments (0 … E−1).
     Columns = repo steps.
@@ -341,7 +409,7 @@ def _plot_assignment_heatmap(data, plots_dir, colors):
     ax.invert_yaxis()  # env 0 at top
 
     plt.tight_layout()
-    fig.savefig(plots_dir / "plot_4_assignment_heatmap.png", dpi=150,
+    fig.savefig(plots_dir / "assignment_heatmap.png", dpi=150,
                 bbox_inches="tight")
     plt.close(fig)
 
@@ -359,7 +427,7 @@ def _plot_per_env_spearman(data, plots_dir, rho_key, title, filename):
         plots_dir: Path to save the plot.
         rho_key: key in ``data`` for the (T, E_subset) ρ array.
         title: plot title string.
-        filename: output filename (e.g. ``"plot_5a_spearman_pre_frozen.png"``).
+        filename: output filename (e.g. ``"spearman_pre_frozen.png"``).
     """
     rho_per_env = data[rho_key]  # (T, E_subset)
     T = data["T"]
@@ -369,10 +437,13 @@ def _plot_per_env_spearman(data, plots_dir, rho_key, title, filename):
 
     # Build box data: one list per step, dropping NaN entries
     box_data = []
+    mean_rho = np.full(T, np.nan)
     for t in range(T):
         row = rho_per_env[t]
         valid = row[~np.isnan(row)]
         box_data.append(valid if len(valid) > 0 else [])
+        if len(valid) > 0:
+            mean_rho[t] = np.mean(valid)
 
     ax.boxplot(
         box_data, positions=steps, widths=0.6,
@@ -385,10 +456,9 @@ def _plot_per_env_spearman(data, plots_dir, rho_key, title, filename):
                     "markeredgewidth": 0},
     )
 
-    # Overlay the mean ρ per step
-    mean_rho = np.nanmean(rho_per_env, axis=1)
+    # Overlay the mean ρ per step (NaN where no valid data exists)
     ax.plot(steps, mean_rho, "o-", color="darkred", lw=2, markersize=4,
-            label="Mean ρ")
+            label=r"Mean $\rho$")
 
     ax.axhline(0, color="gray", ls="--", lw=1, label=r"$\rho = 0$")
     ax.set_ylim(-1.05, 1.05)
@@ -409,16 +479,18 @@ def _plot_per_env_spearman(data, plots_dir, rho_key, title, filename):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def generate_plots(step_logs: list, output_dir: Path) -> None:
-    """Generate all 7 diagnostic plots from step_logs and save to output_dir/plots/.
+    """Generate all diagnostic plots from step_logs and save to output_dir/plots/.
 
     Plots produced:
-        1. Policy Performance — per-policy mean solve rate & avg return
-        2. Active Environments — stackplot of env counts per policy
-        3. Assignment Certainty — box plot of CV (σ/μ) per candidate env
-        4. Assignment Heatmap — env × step greedy-argmax assignment matrix
-        5a. Spearman ρ (Pre-Training Frozen) — per-env box plot
-        5b. Spearman ρ (Pre-Training Finetuned) — per-env box plot
-        5c. Spearman ρ (Post-Training Frozen) — per-env box plot
+        - Policy Performance — per-policy mean solve rate & avg return
+        - Active Environments — stackplot of env counts per policy
+        - Assignment Certainty (CV) — box plot of σ/μ per candidate env
+        - Assignment Certainty (Norm. Margin) — box plot of normalized
+          top-2 gap per candidate env
+        - Assignment Heatmap — env × step greedy-argmax assignment matrix
+        - Spearman ρ (Pre-Training Frozen) — per-env box plot
+        - Spearman ρ (Pre-Training Finetuned) — per-env box plot
+        - Spearman ρ (Post-Training Frozen) — per-env box plot
 
     Each Spearman plot shows the distribution (across candidate environments)
     of within-column rank correlation between affinity scores and solve rates,
@@ -443,27 +515,28 @@ def generate_plots(step_logs: list, output_dir: Path) -> None:
     _plot_performance(data, plots_dir, colors)
     _plot_active_envs(data, plots_dir, colors)
     _plot_certainty(data, plots_dir)
+    _plot_score_margin(data, plots_dir)
     _plot_assignment_heatmap(data, plots_dir, colors)
     _plot_per_env_spearman(
         data, plots_dir,
         rho_key="spearman_pre_frozen",
         title="Affinity–Solve Rate Spearman ρ (Pre-Training Frozen)",
-        filename="plot_5a_spearman_pre_frozen.png",
+        filename="spearman_pre_frozen.png",
     )
     _plot_per_env_spearman(
         data, plots_dir,
         rho_key="spearman_pre_finetune",
         title="Affinity–Solve Rate Spearman ρ (Pre-Training Finetuned)",
-        filename="plot_5b_spearman_pre_finetune.png",
+        filename="spearman_pre_finetune.png",
     )
     _plot_per_env_spearman(
         data, plots_dir,
         rho_key="spearman_post_frozen",
         title="Affinity–Solve Rate Spearman ρ (Post-Training Frozen)",
-        filename="plot_5c_spearman_post_frozen.png",
+        filename="spearman_post_frozen.png",
     )
 
-    print(f"Saved 7 plots to {plots_dir}")
+    print(f"Saved all plots to {plots_dir}")
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Environment observation visualization
