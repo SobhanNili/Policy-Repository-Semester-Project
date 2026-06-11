@@ -20,6 +20,7 @@ import matplotlib
 matplotlib.use("Agg")  # headless — must be set before importing pyplot
 
 import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
 import numpy as np
 import seaborn as sns
 from matplotlib.colors import ListedColormap
@@ -962,6 +963,59 @@ def _get_display_name(repo_type: str) -> str:
     return REPO_DISPLAY_NAMES.get(repo_type, repo_type)
 
 
+# ── Dynamic hyperparam discovery ─────────────────────────────────────────────
+
+_IDENTITY_COLS = {"run_dir", "repo_type", "repo_display"}
+_METRIC_PREFIXES = ("frozen_", "finetune_")
+
+
+def _get_varying_hyperparam_cols(df: pd.DataFrame) -> list[str]:
+    """Return columns that represent varying hyperparameters.
+
+    Excludes identity columns (run_dir, repo_type, repo_display) and
+    metric columns (frozen_*, finetune_*).  Returns only columns with
+    more than one unique non-NaN value — constant columns provide no
+    grouping or labelling signal.
+
+    This is the single source of truth for hyperparam discovery;
+    nowhere else in the module should a hyperparam name be hardcoded.
+    """
+    varying: list[str] = []
+    for col in df.columns:
+        if col in _IDENTITY_COLS:
+            continue
+        if col.startswith(_METRIC_PREFIXES):
+            continue
+        series = df[col].dropna()
+        if series.nunique() > 1:
+            varying.append(col)
+    return varying
+
+
+def _select_best_per_repo(
+    df: pd.DataFrame,
+    metric: str = "finetune_solve_rate_mean",
+) -> pd.DataFrame:
+    """Select the best hyperparameter configuration per repo type.
+
+    For each ``repo_type``, picks the row with the highest value of
+    *metric* (default: finetuned solve rate).  If *metric* is missing
+    for a repo, falls back to ``frozen_solve_rate_mean``.
+
+    Returns a DataFrame with one row per repo type.
+    """
+    best_rows: list[dict] = []
+    for repo_type, group in df.groupby("repo_type", dropna=False):
+        if metric in group.columns and group[metric].notna().any():
+            idx = group[metric].idxmax()
+        elif "frozen_solve_rate_mean" in group.columns:
+            idx = group["frozen_solve_rate_mean"].idxmax()
+        else:
+            idx = group.index[0]
+        best_rows.append(group.loc[idx].to_dict())
+    return pd.DataFrame(best_rows)
+
+
 # ── Data collection ──────────────────────────────────────────────────────────
 
 def collect_experiment_results(
@@ -1046,19 +1100,13 @@ def collect_experiment_results(
                     "finetune_avg_return_std":  ft_df.loc["std", "avg_return"],
                 })
 
-        # ── Flatten key hyperparams for grouping / labeling ─────────────
-        for key in [
-            "seed", "sigma", "history_decay", "mode",
-            "model_name", "checkpoint_path",
-            "assignment_mode", "assignment_temperature",
-            "num_policies", "num_repo_updates",
-            "candidate_pool_size", "num_train_envs",
-            "num_updates", "evaluate_finetune_steps",
-        ]:
-            if key in kwargs:
-                row[key] = kwargs[key]
-            elif key in config:
-                row[key] = config[key]
+        # ── Flatten hyperparams: take ALL scalar values from both files ──
+        for key, val in kwargs.items():
+            if not isinstance(val, (list, dict)):
+                row[key] = val
+        for key, val in config.items():
+            if key not in row and not isinstance(val, (list, dict)):
+                row[key] = val
 
         rows.append(row)
 
@@ -1075,21 +1123,32 @@ def collect_experiment_results(
 
 def _meta_group_keys(df: pd.DataFrame) -> list[str]:
     """Return grouping columns: repo_type, display name, plus any
-    hyperparameter that varies within a repo_type."""
+    hyperparameter that varies (discovered dynamically)."""
     keys = ["repo_type", "repo_display"]
-    for col in ["sigma", "mode", "history_decay"]:
-        if col in df.columns and df[col].nunique() > 1:
-            keys.append(col)
+    keys.extend(_get_varying_hyperparam_cols(df))
     return keys
 
 
-def _build_run_label(row, max_dir_chars: int = 18) -> str:
-    """Compact label for a single run: repo display name + tail of dir name."""
+def _build_run_label(row, varying_cols: list[str] | None = None,
+                     max_dir_chars: int = 18) -> str:
+    """Compact label for a single run: repo display name + tail of dir name.
+
+    If *varying_cols* is provided, only those columns are used for the
+    parameter suffix.  Otherwise all non-identity, non-metric columns
+    with a non-NaN value in *row* are used.
+    """
     dname = Path(row["run_dir"]).name
     tail = dname[-max_dir_chars:] if len(dname) > max_dir_chars else dname
     display = row.get("repo_display", row["repo_type"])
+    if varying_cols is None:
+        varying_cols = [
+            k for k in row.index
+            if k not in _IDENTITY_COLS
+            and not k.startswith(_METRIC_PREFIXES)
+            and pd.notna(row[k])
+        ]
     param_parts = []
-    for k in ["sigma", "mode", "history_decay"]:
+    for k in varying_cols:
         if k in row and pd.notna(row[k]):
             param_parts.append(f"{k}={row[k]}")
     if param_parts:
@@ -1102,41 +1161,55 @@ def _build_run_label(row, max_dir_chars: int = 18) -> str:
 def plot_comparison_bars(
     df: pd.DataFrame,
     plots_dir: Path,
-    metric: str = "solve_rate",
+    title: str | None = None,
+    filename: str = "comparison_bars.png",
 ) -> None:
     """Grouped bar chart: mean ± std by (repo_type, hyperparams).
 
-    Frozen and finetuned results are shown side-by-side.  If multiple runs
-    share the same config (different seeds), they are averaged and std is
-    computed across seeds.
+    Produces a single figure with two subplots: solve rate (top) and
+    avg return (bottom).  Frozen and finetuned results are shown
+    side-by-side.  If multiple runs share the same config (different
+    seeds), they are averaged and std is computed across seeds.
 
     Args:
         df: DataFrame from ``collect_experiment_results``.
         plots_dir: directory to save the plot.
-        metric: ``"solve_rate"`` or ``"avg_return"``.
+        title: optional figure title (default: auto-generated).
+        filename: output filename (default: ``"comparison_bars.png"``).
     """
     group_keys = _meta_group_keys(df)
-    agg = df.groupby(group_keys, dropna=False).agg(
-        frozen_mean=(f"frozen_{metric}_mean", "mean"),
-        frozen_std=(f"frozen_{metric}_mean", "std"),
-        finetune_mean=(f"finetune_{metric}_mean", "mean"),
-        finetune_std=(f"finetune_{metric}_mean", "std"),
-        n=(f"frozen_{metric}_mean", "count"),
-    ).reset_index()
-    agg = agg.sort_values("frozen_mean", ascending=False)
-    agg["frozen_std"] = agg["frozen_std"].fillna(0)
-    agg["finetune_std"] = agg["finetune_std"].fillna(0)
+    varying_cols = _get_varying_hyperparam_cols(df)
 
-    N = len(agg)
+    def _build_agg(metric: str) -> pd.DataFrame:
+        agg = df.groupby(group_keys, dropna=False).agg(
+            frozen_mean=(f"frozen_{metric}_mean", "mean"),
+            frozen_std=(f"frozen_{metric}_mean", "std"),
+            finetune_mean=(f"finetune_{metric}_mean", "mean"),
+            finetune_std=(f"finetune_{metric}_mean", "std"),
+            n=(f"frozen_{metric}_mean", "count"),
+        ).reset_index()
+        agg["frozen_std"] = agg["frozen_std"].fillna(0)
+        agg["finetune_std"] = agg["finetune_std"].fillna(0)
+        return agg
+
+    agg_sr = _build_agg("solve_rate")
+    agg_ar = _build_agg("avg_return")
+
+    # Sort both by frozen solve rate (descending) for consistency
+    order = agg_sr.sort_values("frozen_mean", ascending=False).index
+    agg_sr = agg_sr.loc[order].reset_index(drop=True)
+    agg_ar = agg_ar.loc[order].reset_index(drop=True)
+
+    N = len(agg_sr)
     if N == 0:
         return
 
-    # Build labels: display name + distinguishing hyperparams
+    # Build labels from dynamic varying columns
     labels = []
-    for _, row in agg.iterrows():
+    for _, row in agg_sr.iterrows():
         label = row["repo_display"]
         extras = []
-        for k in ["sigma", "mode", "history_decay"]:
+        for k in varying_cols:
             if k in row and pd.notna(row[k]):
                 extras.append(f"{k}={row[k]}")
         if extras:
@@ -1146,48 +1219,93 @@ def plot_comparison_bars(
     x = np.arange(N)
     width = 0.35
 
-    fig, ax = plt.subplots(figsize=(max(8, N * 0.9), 5))
-
-    colors = [_get_color_for_repo(t) for t in agg["repo_type"]]
-    bars1 = ax.bar(
-        x - width / 2, agg["frozen_mean"], width,
-        yerr=agg["frozen_std"], capsize=4,
-        color=colors, edgecolor="white", linewidth=0.8,
-        label="Frozen",
-    )
-    bars2 = ax.bar(
-        x + width / 2, agg["finetune_mean"], width,
-        yerr=agg["finetune_std"], capsize=4,
-        color=[_desaturate(c, 0.5) for c in colors],
-        edgecolor="white", linewidth=0.8,
-        label="Finetuned",
+    fig, (ax1, ax2) = plt.subplots(
+        2, 1, figsize=(max(8, N * 0.9), 8), sharex=True,
     )
 
-    # Annotate seed count
-    for i, (m, s, n) in enumerate(zip(agg["frozen_mean"],
-                                       agg["frozen_std"],
-                                       agg["n"])):
-        if n > 1:
-            ax.annotate(f"n={n}", (i - width / 2, m + s + 0.015),
-                        ha="center", fontsize=7, color="gray")
+    colors = [_get_color_for_repo(t) for t in agg_sr["repo_type"]]
 
-    ax.set_xticks(x)
-    ax.set_xticklabels(labels, rotation=25, ha="right", fontsize=9)
-    metric_label = "Solve Rate" if metric == "solve_rate" else "Avg Return"
-    ax.set_ylabel(metric_label)
-    ax.set_title(f"Policy Repo Comparison — Mean {metric_label}")
-    all_means = np.concatenate([agg["frozen_mean"].values,
-                                 agg["finetune_mean"].values])
-    all_stds = np.concatenate([agg["frozen_std"].values,
-                                agg["finetune_std"].values])
-    ymax = (all_means + all_stds).max() + 0.05
-    ax.set_ylim(0, max(1.05, ymax))
-    ax.legend(fontsize=9)
+    def _draw_bars(ax, agg, metric_label: str):
+        ax.bar(
+            x - width / 2, agg["frozen_mean"], width,
+            yerr=agg["frozen_std"], capsize=4,
+            color=colors, edgecolor="white", linewidth=0.8,
+        )
+        ax.bar(
+            x + width / 2, agg["finetune_mean"], width,
+            yerr=agg["finetune_std"], capsize=4,
+            color=[_desaturate(c, 0.5) for c in colors],
+            edgecolor="white", linewidth=0.8,
+            hatch="//",
+        )
+        # Annotate seed count
+        for i, (m, s, n) in enumerate(zip(agg["frozen_mean"],
+                                           agg["frozen_std"],
+                                           agg["n"])):
+            if n > 1:
+                ax.annotate(f"n={n}", (i - width / 2, m + s + 0.015),
+                            ha="center", fontsize=7, color="gray")
+        ax.set_ylabel(metric_label)
+        all_means = np.concatenate([agg["frozen_mean"].values,
+                                     agg["finetune_mean"].values])
+        all_stds = np.concatenate([agg["frozen_std"].values,
+                                    agg["finetune_std"].values])
+        ymax = (all_means + all_stds).max() + 0.05
+        ax.set_ylim(0, max(1.05, ymax))
+
+    _draw_bars(ax1, agg_sr, "Solve Rate")
+    _draw_bars(ax2, agg_ar, "Avg Return")
+
+    # ── Shared legend with pattern-based handles (not colour-based) ───
+    legend_handles = [
+        mpatches.Patch(facecolor="#888888", edgecolor="white",
+                       linewidth=0.8, label="Frozen"),
+        mpatches.Patch(facecolor="#cccccc", edgecolor="white",
+                       linewidth=0.8, hatch="//", label="Finetuned"),
+    ]
+    fig.legend(
+        handles=legend_handles, loc="lower center",
+        ncol=2, fontsize=9, frameon=False,
+        handlelength=1.4, handleheight=1.2,
+    )
+
+    ax2.set_xticks(x)
+    ax2.set_xticklabels(labels, rotation=25, ha="right", fontsize=9)
+
+    if title is None:
+        title = "Policy Repo Comparison"
+    fig.suptitle(title, fontsize=13, fontweight="bold")
 
     plt.tight_layout()
-    filename = f"comparison_{metric}.png"
     fig.savefig(plots_dir / filename, dpi=150, bbox_inches="tight")
     plt.close(fig)
+
+
+# ── Plot 1b: Per-repo-type bar charts ────────────────────────────────────────
+
+def plot_per_repo_comparison_bars(
+    df: pd.DataFrame,
+    plots_dir: Path,
+) -> None:
+    """For each repo type, produce a dual-subplot bar chart comparing
+    its own hyperparameter configurations (frozen vs finetuned).
+
+    One ``comparison_{repo_type}.png`` file is saved per repo type.
+    Repo types with only a single configuration still get a plot for
+    consistency.
+    """
+    for repo_type in sorted(df["repo_type"].unique()):
+        sub_df = df[df["repo_type"] == repo_type]
+        if sub_df.empty:
+            continue
+        display = _get_display_name(repo_type)
+        safe_name = repo_type  # already filesystem-safe
+        plot_comparison_bars(
+            sub_df,
+            plots_dir,
+            title=f"{display} — Hyperparameter Comparison",
+            filename=f"comparison_{safe_name}.png",
+        )
 
 
 def _desaturate(hex_color: str, amount: float = 0.4) -> str:
@@ -1267,13 +1385,14 @@ def plot_per_env_distributions(
     narrow violins with long tails = fragile (driven by a few easy envs).
     """
     records: list[dict] = []
+    varying_cols = _get_varying_hyperparam_cols(df)
     for _, row in df.iterrows():
         csv_path = Path(row["run_dir"]) / "eval_frozen.csv"
         if not csv_path.exists():
             continue
         full = pd.read_csv(csv_path)
         env_rows = full[~full["env"].isin(["mean", "std"])]
-        label = _build_run_label(row)
+        label = _build_run_label(row, varying_cols=varying_cols)
         for _, erow in env_rows.iterrows():
             records.append({
                 "run_label": label,
@@ -1321,6 +1440,15 @@ def generate_comparison_plots(
 ) -> None:
     """Generate all cross-experiment comparison plots and a summary CSV.
 
+    Produces:
+        - ``comparison_{repo_type}.png`` — one per repo type, comparing
+          hyperparam configs within that repo (dual subplot).
+        - ``comparison_best.png`` — best config per repo type, side by
+          side (dual subplot).
+        - ``frozen_vs_finetune_scatter.png`` — all runs scatter.
+        - ``per_env_distributions.png`` — violin plot (all runs).
+        - ``comparison_summary.csv`` — all metrics in one table.
+
     Args:
         df: DataFrame from ``collect_experiment_results``.
         outputs_root: root directory containing run folders (used for
@@ -1330,15 +1458,27 @@ def generate_comparison_plots(
     plots_dir.mkdir(parents=True, exist_ok=True)
     sns.set_theme(style="whitegrid", palette="muted", font_scale=1.1)
 
-    plot_comparison_bars(df, plots_dir, metric="solve_rate")
-    plot_comparison_bars(df, plots_dir, metric="avg_return")
+    # ── Per-repo-type plots ────────────────────────────────────────────
+    plot_per_repo_comparison_bars(df, plots_dir)
 
+    # ── Best-of-each cross-repo plot ────────────────────────────────────
+    best_df = _select_best_per_repo(df)
+    if not best_df.empty:
+        plot_comparison_bars(
+            best_df,
+            plots_dir,
+            title="Best Configuration Per Repo Type",
+            filename="comparison_best.png",
+        )
+
+    # ── Scatter plots (all runs) ────────────────────────────────────────
     has_ft = ("finetune_solve_rate_mean" in df.columns
               and df["finetune_solve_rate_mean"].notna().any())
     if has_ft:
         plot_frozen_vs_finetune_scatter(df, plots_dir, metric="solve_rate")
         plot_frozen_vs_finetune_scatter(df, plots_dir, metric="avg_return")
 
+    # ── Per-env distributions (all runs) ────────────────────────────────
     if outputs_root is not None:
         plot_per_env_distributions(df, plots_dir)
 

@@ -19,8 +19,9 @@ Usage:
     python scripts/compare_runs.py --table-only
 
 Output (saved to ``outputs/run_comparisons/`` by default):
-    comparison_solve_rate.png          — grouped bar chart: mean solve rate
-    comparison_avg_return.png          — grouped bar chart: mean avg return
+    comparison_{repo_type}.png          — per-repo-type bar charts comparing
+                                          hyperparam configs within each repo
+    comparison_best.png                 — best config per repo type, side by side
     frozen_vs_finetune_scatter.png     — scatter: frozen vs finetuned
     per_env_distributions.png          — violin plot: per-env solve rates
     comparison_summary.csv             — all metrics in one table
