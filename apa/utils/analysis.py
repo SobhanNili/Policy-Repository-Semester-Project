@@ -111,11 +111,13 @@ def _unpack_step_logs(step_logs: list) -> dict:
     # ── Raw greedy argmax counts: (T, P) ────────────────────────────────
     # How many candidate envs would choose each policy based purely on the
     # highest affinity score — before any exploration (softmax / ε-greedy)
-    # or safety-net corrections.
+    # or safety-net corrections.  When multiple policies share the maximum
+    # score for an env, ALL are counted as greedy.
     n_greedy_envs = np.zeros((T, P), dtype=int)
     for t in range(T):
-        greedy = np.argmax(affinities[t], axis=0)  # (E_subset,) — policy index per env
-        n_greedy_envs[t] = np.bincount(greedy, minlength=P)
+        max_per_col = np.max(affinities[t], axis=0)           # (E_subset,)
+        is_max = np.isclose(affinities[t], max_per_col)       # (P, E_subset)
+        n_greedy_envs[t] = np.sum(is_max, axis=1)             # (P,)
 
     # ── CV per env: σ_p(affinity) / μ_p(affinity) ───────────────────────
     mean_p = affinities.mean(axis=1)   # (T, E_subset)
@@ -596,7 +598,10 @@ def generate_env_assignment_grids(
     steps_to_plot = list(range(0, T, step_interval))
 
     for t in steps_to_plot:
-        greedy_policy = np.argmax(data["affinities"][t], axis=0)
+        # All policies tied for the maximum score count as greedy (solid border).
+        aff_t = data["affinities"][t]                              # (P, E_subset)
+        max_per_col = np.max(aff_t, axis=0)                        # (E_subset,)
+        is_greedy = np.isclose(aff_t, max_per_col)                 # (P, E_subset) bool
 
         # ── Collect assigned envs per policy ─────────────────────────
         policy_envs: list[list[tuple[int, float, bool]]] = []
@@ -605,7 +610,7 @@ def generate_env_assignment_grids(
             idx = np.where(active)[0]
             gids = data["candidate_env_indices"][t][idx]
             srs = data["solve_rates"][t, p, idx]
-            greedy = greedy_policy[idx] == p
+            greedy = is_greedy[p, idx]
             info = [(int(g), float(s), bool(ig)) for g, s, ig in zip(gids, srs, greedy)]
             info.sort(key=lambda x: x[0])
             policy_envs.append(info)
