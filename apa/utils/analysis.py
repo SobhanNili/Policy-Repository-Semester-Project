@@ -6,7 +6,8 @@ It is used by both ``scripts/run.py`` (during training) and
 
 Generates the following diagnostic plots:
     - Policy Performance (per-policy mean solve rate & avg return over steps)
-    - Active Environments per Policy (stackplot)
+    - Active Environments per Policy (stackplot, post-mask)
+    - Attracted Environments per Policy (stackplot, raw argmax before safety net)
     - Assignment Certainty — CV (σ/μ per env, box plot per step)
     - Assignment Certainty — Normalized Margin (box plot per step)
     - Greedy Assignment Heatmap (env × step, colored by assigned policy)
@@ -46,7 +47,8 @@ def _unpack_step_logs(step_logs: list) -> dict:
         candidate_env_indices  (T, E_subset)
         mean_solve_rate  (T, P)  — mean over active envs only
         mean_avg_return  (T, P)  — mean over active envs only
-        n_active_envs    (T, P)  — count of active envs
+        n_active_envs    (T, P)  — count of active envs (post-mask)
+        n_greedy_envs    (T, P)  — count of envs attracted by raw argmax
         cv_per_env       (T, E_subset)  — σ_p / μ_p per candidate env
         score_margin_per_env  (T, E_subset)  — normalized top-2 margin per env
         spearman_pre_frozen    (T, E_subset)  — per-env ρ, pre-training frozen
@@ -106,6 +108,15 @@ def _unpack_step_logs(step_logs: list) -> dict:
                     np.where(active, avg_returns[t, p], np.nan)
                 )
 
+    # ── Raw greedy argmax counts: (T, P) ────────────────────────────────
+    # How many candidate envs would choose each policy based purely on the
+    # highest affinity score — before any exploration (softmax / ε-greedy)
+    # or safety-net corrections.
+    n_greedy_envs = np.zeros((T, P), dtype=int)
+    for t in range(T):
+        greedy = np.argmax(affinities[t], axis=0)  # (E_subset,) — policy index per env
+        n_greedy_envs[t] = np.bincount(greedy, minlength=P)
+
     # ── CV per env: σ_p(affinity) / μ_p(affinity) ───────────────────────
     mean_p = affinities.mean(axis=1)   # (T, E_subset)
     std_p  = affinities.std(axis=1)    # (T, E_subset)
@@ -157,6 +168,7 @@ def _unpack_step_logs(step_logs: list) -> dict:
         "mean_solve_rate": mean_solve_rate,
         "mean_avg_return": mean_avg_return,
         "n_active_envs": n_active_envs,
+        "n_greedy_envs": n_greedy_envs,
         "cv_per_env": cv_per_env,
         "score_margin_per_env": score_margin_per_env,
         "spearman_pre_frozen": spearman_pre_frozen,
@@ -224,8 +236,8 @@ def _plot_performance(data, plots_dir, colors):
             color=colors[p], lw=2, label=f"Policy {p}",
             marker=".", markersize=4,
         )
-    ax1.set_ylabel("Solve Rate")
-    ax1.set_title("Policy Performance on Active Envs Over Training")
+    ax1.set_ylabel("Episode Solve Rate")
+    ax1.set_title("Policy Performance on Assigned Environments")
     ax1.legend(ncol=P, loc="lower right")
     ax1.set_ylim(-0.05, 1.05)
 
@@ -235,12 +247,12 @@ def _plot_performance(data, plots_dir, colors):
             color=colors[p], lw=2, label=f"Policy {p}",
             marker=".", markersize=4,
         )
-    ax2.set_ylabel("Avg Return")
-    ax2.set_xlabel("Repo Step")
+    ax2.set_ylabel("Avg. Episode Return")
+    ax2.set_xlabel("Repository Training Step")
     ax2.legend(ncol=P, loc="lower right")
 
     plt.tight_layout()
-    fig.savefig(plots_dir / "performance.png", dpi=150, bbox_inches="tight")
+    fig.savefig(plots_dir / "performance_over_training.png", dpi=150, bbox_inches="tight")
     plt.close(fig)
 
 
@@ -256,18 +268,54 @@ def _plot_active_envs(data, plots_dir, colors):
         labels=[f"Policy {p}" for p in range(P)],
         colors=colors, alpha=0.85,
     )
-    ax.set_xlabel("Repo Step")
-    ax.set_ylabel("Number of Active Envs")
-    ax.set_title("Environments Assigned Per Policy Over Training")
+    ax.set_xlabel("Repository Training Step")
+    ax.set_ylabel("# Assigned Environments")
+    ax.set_title("Number of Assigned Environments to Each Policy")
     ax.legend(loc="upper right")
     ax.set_xlim(0, T - 1)
 
     plt.tight_layout()
-    fig.savefig(plots_dir / "active_envs.png", dpi=150, bbox_inches="tight")
+    fig.savefig(plots_dir / "assigned_envs.png", dpi=150, bbox_inches="tight")
     plt.close(fig)
 
 
-def _plot_certainty(data, plots_dir):
+def _plot_env_greedy_policy_choice(data, plots_dir, colors):
+    """Stackplot of environment counts per policy by raw argmax (no exploration, no safety net).
+
+    Counts how many candidate environments would choose each policy based
+    purely on the highest affinity score — before any assignment-mode
+    stochasticity (softmax / ε-greedy) or safety-net corrections.
+
+    Contrast with ``_plot_active_envs``: if this plot shows one policy
+    hoarding all envs while the active-envs plot is balanced, the safety
+    net is doing heavy lifting.
+    """
+    T, P = data["T"], data["P"]
+    steps = np.arange(T)
+
+    fig, ax = plt.subplots(figsize=(10, 4))
+
+    ax.stackplot(
+        steps, data["n_greedy_envs"].T,
+        labels=[f"Policy {p}" for p in range(P)],
+        colors=colors, alpha=0.85,
+    )
+    ax.set_xlabel("Repository Training Step")
+    ax.set_ylabel("# Attracted Environments")
+    ax.set_title("Number of Attracted Environments per Policy (Greedy Affinity Choice)")
+    ax.legend(loc="upper right")
+    ax.set_xlim(0, T - 1)
+
+    # Reference line for candidate pool size
+    ax.axhline(data["E_subset"], color="gray", ls="--", lw=1, alpha=0.5,
+               label=f"Candidate pool ({data['E_subset']})")
+
+    plt.tight_layout()
+    fig.savefig(plots_dir / "env_greedy_policy_choices.png", dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
+def _plot_affinity_score_spread_cv(data, plots_dir):
     """Box plot of per-environment CV (σ/μ) at each repo step.
 
     Each box shows the distribution of CV across the E_subset candidate
@@ -297,19 +345,19 @@ def _plot_certainty(data, plots_dir):
     ax.plot(steps, mean_cv, "o-", color="darkred", lw=2, markersize=4,
             label="Mean CV")
 
-    ax.set_xlabel("Repo Step")
+    ax.set_xlabel("Repository Training Step")
     ax.set_ylabel(r"CV ($\sigma$ / $\mu$) per Environment")
-    ax.set_title("Assignment Certainty Over Training")
+    ax.set_title("Affinity Score Spread — Coefficient of Variation Over Training")
     ax.legend(loc="upper left")
 
     _thin_ticks(ax, steps)
 
     plt.tight_layout()
-    fig.savefig(plots_dir / "certainty_cv.png", dpi=150, bbox_inches="tight")
+    fig.savefig(plots_dir / "score_spread_cv.png", dpi=150, bbox_inches="tight")
     plt.close(fig)
 
 
-def _plot_score_margin(data, plots_dir):
+def _plot_affinity_score_spread_margin(data, plots_dir):
     """Box plot of per-environment Normalized Margin at each repo step.
 
     Each box shows the distribution of the normalized top-2 margin across the
@@ -347,16 +395,16 @@ def _plot_score_margin(data, plots_dir):
     ax.plot(steps, mean_margin, "o-", color="darkred", lw=2, markersize=4,
             label="Mean Normalized Margin")
 
-    ax.set_xlabel("Repo Step")
+    ax.set_xlabel("Repository Training Step")
     ax.set_ylabel("Normalized Margin per Environment")
-    ax.set_title(r"Policy Dominance — Normalized Top-2 Margin  $(s_0 - s_1)\,/\,(s_0 - s_{P-1})$  Over Training")
+    ax.set_title(r"Affinity Score Spread — Normalized Top-2 Margin")
     ax.set_ylim(-0.05, 1.05)
     ax.legend(loc="lower right")
 
     _thin_ticks(ax, steps)
 
     plt.tight_layout()
-    fig.savefig(plots_dir / "certainty_normalized_margin.png", dpi=150,
+    fig.savefig(plots_dir / "score_spread_margin.png", dpi=150,
                 bbox_inches="tight")
     plt.close(fig)
 
@@ -397,9 +445,9 @@ def _plot_assignment_heatmap(data, plots_dir, colors):
     cbar.set_label("Assigned Policy")
     cbar.ax.set_yticklabels([f"Policy {p}" for p in range(P)])
 
-    ax.set_xlabel("Repo Step")
+    ax.set_xlabel("Repository Training Step")
     ax.set_ylabel("Environment Index")
-    ax.set_title("Greedy Assignment per Environment Over Training")
+    ax.set_title("Greedy Policy Assignment per Environment Over Training")
 
     # Tick layout
     _thin_ticks(ax, np.arange(T) + 0.5, max_ticks=15)
@@ -485,7 +533,8 @@ def generate_plots(step_logs: list, output_dir: Path) -> None:
 
     Plots produced:
         - Policy Performance — per-policy mean solve rate & avg return
-        - Active Environments — stackplot of env counts per policy
+        - Active Environments — stackplot of env counts per policy (post-mask)
+        - Attracted Environments — stackplot of raw argmax env counts per policy
         - Assignment Certainty (CV) — box plot of σ/μ per candidate env
         - Assignment Certainty (Norm. Margin) — box plot of normalized
           top-2 gap per candidate env
@@ -516,27 +565,28 @@ def generate_plots(step_logs: list, output_dir: Path) -> None:
 
     _plot_performance(data, plots_dir, colors)
     _plot_active_envs(data, plots_dir, colors)
-    _plot_certainty(data, plots_dir)
-    _plot_score_margin(data, plots_dir)
+    _plot_env_greedy_policy_choice(data, plots_dir, colors)
+    _plot_affinity_score_spread_cv(data, plots_dir)
+    _plot_affinity_score_spread_margin(data, plots_dir)
     _plot_assignment_heatmap(data, plots_dir, colors)
     _plot_per_env_spearman(
         data, plots_dir,
         rho_key="spearman_pre_frozen",
-        title="Affinity–Solve Rate Spearman ρ (Pre-Training Frozen)",
-        filename="spearman_pre_frozen.png",
+        title="Affinity Score - Solve Rate Spearman Correlation (Frozen Evaluation)",
+        filename="affinity_sr_spearman_frozen.png",
     )
     _plot_per_env_spearman(
         data, plots_dir,
         rho_key="spearman_pre_finetune",
-        title="Affinity–Solve Rate Spearman ρ (Pre-Training Finetuned)",
-        filename="spearman_pre_finetune.png",
+        title="Affinity Score - Solve Rate Spearman Correlation (Finetuned Evaluation)",
+        filename="affinity_sr_spearman_finetune.png",
     )
-    _plot_per_env_spearman(
-        data, plots_dir,
-        rho_key="spearman_post_frozen",
-        title="Affinity–Solve Rate Spearman ρ (Post-Training Frozen)",
-        filename="spearman_post_frozen.png",
-    )
+    # _plot_per_env_spearman(
+    #     data, plots_dir,
+    #     rho_key="spearman_post_frozen",
+    #     title="Affinity–Solve Rate Spearman ρ (Post-Training Frozen)",
+    #     filename="spearman_post_frozen.png",
+    # )
 
     print(f"Saved all plots to {plots_dir}")
 
