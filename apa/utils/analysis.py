@@ -26,6 +26,7 @@ from matplotlib.colors import ListedColormap
 from pathlib import Path
 from scipy.stats import spearmanr
 import json
+import pickle
 import pandas as pd
 import jax
 
@@ -703,6 +704,97 @@ def generate_env_assignment_grids(
 
     print(f"Saved {len(steps_to_plot)} assignment grid images to {grids_dir}")
 
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Evaluation assignment bar plot
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def plot_eval_assignment_bars(
+    env2policy: np.ndarray,
+    num_policies: int,
+    plots_dir: Path,
+) -> None:
+    """Bar plot: absolute number of evaluation environments assigned to
+    each policy.
+
+    Assignment is determined by greedy argmax over affinity scores, so it
+    is identical for frozen and finetuned evaluation.
+
+    Args:
+        env2policy: (E_eval,) integer array — which policy each eval
+            environment was assigned to.
+        num_policies: total number of policies *P*.
+        plots_dir: directory to save ``eval_assignment_bars.png``.
+    """
+    env2policy = np.asarray(env2policy, dtype=int)
+    counts = np.bincount(env2policy, minlength=num_policies)
+
+    P = num_policies
+    x = np.arange(P)
+
+    fig, ax = plt.subplots(figsize=(max(6, P * 0.9), 4.8))
+    fig.patch.set_facecolor("white")
+
+    colors = sns.color_palette("pastel", P)
+
+    bars = ax.bar(
+        x, counts,
+        color=colors,
+        edgecolor="white",
+        linewidth=1.2,
+        zorder=3,
+    )
+
+    ax.set_xticks(x)
+    ax.set_xticklabels([f"Policy {p}" for p in range(P)], fontsize=10)
+    ax.set_ylabel("# of Environments Assigned", fontsize=11)
+    ax.set_title(
+        "Evaluation Environment Assignment Distribution",
+        fontsize=13, fontweight="bold",
+    )
+
+    y_max = counts.max()
+    ax.set_ylim(0, y_max + max(2, y_max * 0.15))
+    ax.grid(axis="y", alpha=0.3)
+    ax.set_axisbelow(True)
+
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+
+    plt.tight_layout()
+    plots_dir.mkdir(parents=True, exist_ok=True)
+    fig.savefig(
+        plots_dir / "eval_env_assignment_dist.png",
+        dpi=150, bbox_inches="tight", facecolor="white",
+    )
+    plt.close(fig)
+
+
+def _plot_eval_assignment_from_run(run_dir: Path) -> None:
+    """Load eval assignment from saved pickles and generate the bar plot."""
+    import json
+
+    frozen_path = run_dir / "eval_frozen_results.pkl"
+    config_path = run_dir / "config.json"
+    if not frozen_path.exists() or not config_path.exists():
+        return
+
+    with open(frozen_path, "rb") as f:
+        _, env2policy, _ = pickle.load(f)
+
+    with open(config_path) as f:
+        config = json.load(f)
+    num_policies = int(config.get("num_policies", 0))
+    if num_policies == 0:
+        return
+
+    plot_eval_assignment_bars(
+        np.array(env2policy),
+        num_policies,
+        run_dir / "plots",
+    )
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # Public API
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -775,6 +867,9 @@ def generate_plots(step_logs: list, output_dir: Path) -> None:
         step_logs, output_dir,
         step_interval=grid_interval,
     )
+
+    # ── Eval assignment bar plot ─────────────────────────────────────────
+    _plot_eval_assignment_from_run(output_dir)
 
     print(f"Saved all plots to {plots_dir}")
 
