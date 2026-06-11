@@ -13,7 +13,7 @@ Generates the following diagnostic plots:
     - Greedy Assignment Heatmap (env × step, colored by assigned policy)
     - Affinity–Solve Rate Spearman ρ (Pre-Training Frozen)
     - Affinity–Solve Rate Spearman ρ (Pre-Training Finetuned)
-    - Affinity–Solve Rate Spearman ρ (Post-Training Frozen)
+    - Policy–Environment Assignment Grids (per-step, with solve & greedy indicators)
 """
 
 import matplotlib
@@ -525,6 +525,180 @@ def _plot_per_env_spearman(data, plots_dir, rho_key, title, filename):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# Per-step policy–environment assignment grids
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def generate_env_assignment_grids(
+    step_logs: list,
+    output_dir: Path,
+    obs_dir: str = "env_train_observations",
+    step_interval: int = 1,
+    max_envs_per_policy: int | None = None,
+    solve_threshold: float = 0.0,
+    cell_size_inches: float = 1.4,
+) -> None:
+    """Generate per-step grid images showing which environments each policy
+    was assigned to, what those environments look like, and whether the
+    policy solved them.
+
+    Grid layout
+    -----------
+    * Rows    = policies (fixed).
+    * Columns = env slots (fixed width — policies with fewer envs have
+      grey trailing cells).
+    * Each cell contains the environment observation image, framed by a
+      coloured border.
+
+    Border encoding
+    ---------------
+    ======== ======== ====================================================
+    Colour   Style    Meaning
+    ======== ======== ====================================================
+    Green    Solid    Greedy choice (highest affinity) — solved
+    Red      Solid    Greedy choice — did **not** solve
+    Green    Dashed   Safety-net / exploration — solved anyway
+    Red      Dashed   Safety-net / exploration — did **not** solve
+    ======== ======== ====================================================
+
+    Images saved to ``output_dir/plots/assignment_grids/step_XXXX.png``.
+    """
+    from matplotlib.lines import Line2D
+
+    data = _unpack_step_logs(step_logs)
+    T, P, E_subset = data["T"], data["P"], data["E_subset"]
+    obs_path = output_dir / obs_dir
+
+    if not obs_path.is_dir():
+        print(f"Warning: observation directory not found — skipping assignment grids: {obs_path}")
+        return
+
+    if max_envs_per_policy is None:
+        max_envs_per_policy = min(E_subset, 10)
+    n_cols = max_envs_per_policy
+    if n_cols == 0:
+        return
+
+    grids_dir = output_dir / "plots" / "assignment_grids"
+    grids_dir.mkdir(parents=True, exist_ok=True)
+
+    # ── Pre-load env images ────────────────────────────────────────────
+    num_envs = data["num_envs"]
+    env_images: dict[int, np.ndarray] = {}
+    for i in range(num_envs):
+        p = obs_path / f"env_{i:03d}.png"
+        if p.exists():
+            env_images[i] = plt.imread(str(p))
+
+    GREEN = "#5b9a5e"
+    RED = "#d35e5e"
+    GREY = "#e8e8e8"
+
+    steps_to_plot = list(range(0, T, step_interval))
+
+    for t in steps_to_plot:
+        greedy_policy = np.argmax(data["affinities"][t], axis=0)
+
+        # ── Collect assigned envs per policy ─────────────────────────
+        policy_envs: list[list[tuple[int, float, bool]]] = []
+        for p in range(P):
+            active = data["active_masks"][t, :, p].astype(bool)
+            idx = np.where(active)[0]
+            gids = data["candidate_env_indices"][t][idx]
+            srs = data["solve_rates"][t, p, idx]
+            greedy = greedy_policy[idx] == p
+            info = [(int(g), float(s), bool(ig)) for g, s, ig in zip(gids, srs, greedy)]
+            info.sort(key=lambda x: x[0])
+            policy_envs.append(info)
+
+        # ── Figure ──────────────────────────────────────────────────
+        fig, axes = plt.subplots(
+            P, n_cols,
+            figsize=(n_cols * cell_size_inches, P * cell_size_inches + 0.55),
+            squeeze=False,
+            facecolor="white",
+        )
+        fig.subplots_adjust(
+            left=0.09, right=0.98, top=0.92, bottom=0.10,
+            wspace=0.10, hspace=0.14,
+        )
+
+        fig.text(0.5, 0.965, f"Step {t}",
+                 ha="center", va="top", fontsize=12, fontweight="bold")
+
+        for p in range(P):
+            envs = policy_envs[p]
+            n_envs = len(envs)
+            n_greedy = sum(1 for _, _, ig in envs if ig)
+            truncated = n_envs > n_cols
+            shown = envs[:n_cols]
+
+            for col in range(n_cols):
+                ax = axes[p, col]
+                ax.set_xticks([])
+                ax.set_yticks([])
+                ax.tick_params(left=False, bottom=False)
+
+                if col < len(shown):
+                    gid, sr, is_greedy = shown[col]
+                    solved = (not np.isnan(sr)) and (sr > solve_threshold)
+
+                    if gid in env_images:
+                        ax.imshow(env_images[gid])
+                    else:
+                        ax.set_facecolor("#ddd")
+
+                    # Border
+                    c = GREEN if solved else RED
+                    lw = 3.0 if is_greedy else 1.6
+                    ls = "-" if is_greedy else "--"
+                    for spine in ax.spines.values():
+                        spine.set_color(c)
+                        spine.set_linewidth(lw)
+                        spine.set_linestyle(ls)
+                        spine.set_visible(True)
+
+                    # Label
+                    sr_str = f"{sr:.2f}" if not np.isnan(sr) else "—"
+                    ax.text(0.5, 0.015, f"E{gid}  {sr_str}",
+                            ha="center", va="bottom", fontsize=6,
+                            fontweight="bold" if is_greedy else "normal",
+                            color=c, transform=ax.transAxes)
+                else:
+                    ax.set_facecolor(GREY)
+
+            # Row label
+            parts = [f"Policy {p}", f"{n_envs} envs"]
+            if n_greedy:
+                parts.append(f"{n_greedy} greedy")
+            if truncated:
+                parts.append(f"+{n_envs - n_cols} more")
+            axes[p, 0].set_ylabel("\n".join(parts),
+                                   fontsize=7.5, fontweight="bold",
+                                   rotation=0, ha="right", va="center",
+                                   labelpad=38)
+
+        # ── Legend ──────────────────────────────────────────────────
+        legend_handles = [
+            Line2D([0], [0], color=GREEN, lw=2.5, label="Greedy, solved"),
+            Line2D([0], [0], color=RED,   lw=2.5, label="Greedy, fail"),
+            Line2D([0], [0], color=GREEN, lw=1.4, ls="--", label="Safety-net, solved"),
+            Line2D([0], [0], color=RED,   lw=1.4, ls="--", label="Safety-net, fail"),
+        ]
+        fig.legend(
+            handles=legend_handles, loc="lower center",
+            ncol=4, fontsize=7, frameon=False,
+            handlelength=1.2, handletextpad=0.5,
+            columnspacing=1.0,
+        )
+
+        fig.savefig(grids_dir / f"step_{t:04d}.png",
+                    dpi=150, bbox_inches="tight",
+                    facecolor="white", edgecolor="none")
+        plt.close(fig)
+
+    print(f"Saved {len(steps_to_plot)} assignment grid images to {grids_dir}")
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # Public API
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -541,7 +715,8 @@ def generate_plots(step_logs: list, output_dir: Path) -> None:
         - Assignment Heatmap — env × step greedy-argmax assignment matrix
         - Spearman ρ (Pre-Training Frozen) — per-env box plot
         - Spearman ρ (Pre-Training Finetuned) — per-env box plot
-        - Spearman ρ (Post-Training Frozen) — per-env box plot
+        - Policy–Environment Assignment Grids — per-step thumbnails with
+          solve (green/red) and greedy (solid/dashed) indicators
 
     Each Spearman plot shows the distribution (across candidate environments)
     of within-column rank correlation between affinity scores and solve rates,
@@ -587,6 +762,14 @@ def generate_plots(step_logs: list, output_dir: Path) -> None:
     #     title="Affinity–Solve Rate Spearman ρ (Post-Training Frozen)",
     #     filename="spearman_post_frozen.png",
     # )
+
+    # ── Per-step assignment grid images ─────────────────────────────────
+    # Use a sensible default interval: roughly 20 grids across training
+    grid_interval = max(1, data["T"] // 20)
+    generate_env_assignment_grids(
+        step_logs, output_dir,
+        step_interval=grid_interval,
+    )
 
     print(f"Saved all plots to {plots_dir}")
 
