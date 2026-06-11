@@ -796,6 +796,58 @@ def _plot_eval_assignment_from_run(run_dir: Path) -> None:
     )
 
 
+def _group_eval_env_images_by_policy(run_dir: Path) -> None:
+    """Copy eval env observation images into per-policy subfolders.
+
+    Reads ``env2policy`` from ``eval_frozen_results.pkl`` and copies each
+    ``env_{i:03d}.png`` from ``eval_env_observations/`` into
+    ``eval_env_observations/by_policy/policy_{p}/``, so you can quickly
+    browse which environments were matched to each policy during evaluation.
+    """
+    import json
+    import shutil
+
+    frozen_path = run_dir / "eval_frozen_results.pkl"
+    config_path = run_dir / "config.json"
+    obs_dir = run_dir / "eval_env_observations"
+
+    if not frozen_path.exists() or not config_path.exists():
+        return
+    if not obs_dir.is_dir():
+        return
+
+    with open(frozen_path, "rb") as f:
+        _, env2policy, _ = pickle.load(f)
+
+    with open(config_path) as f:
+        config = json.load(f)
+    num_policies = int(config.get("num_policies", 0))
+    if num_policies == 0:
+        return
+
+    env2policy = np.asarray(env2policy, dtype=int)
+
+    by_policy_dir = obs_dir / "by_policy"
+    # Clean previous grouping to avoid stale files from an older run
+    if by_policy_dir.exists():
+        shutil.rmtree(by_policy_dir)
+
+    copied = 0
+    E = len(env2policy)
+    for i in range(E):
+        p = int(env2policy[i])
+        src = obs_dir / f"env_{i:03d}.png"
+        if not src.exists():
+            continue
+        dst_dir = by_policy_dir / f"policy_{p}"
+        dst_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dst_dir / f"env_{i:03d}.png")
+        copied += 1
+
+    print(f"Grouped {copied} eval env images into {num_policies} policy "
+          f"subfolders under {by_policy_dir}")
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # Public API
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -871,6 +923,9 @@ def generate_plots(step_logs: list, output_dir: Path) -> None:
 
     # ── Eval assignment bar plot ─────────────────────────────────────────
     _plot_eval_assignment_from_run(output_dir)
+
+    # ── Group eval env images by assigned policy ─────────────────────────
+    _group_eval_env_images_by_policy(output_dir)
 
     print(f"Saved all plots to {plots_dir}")
 
