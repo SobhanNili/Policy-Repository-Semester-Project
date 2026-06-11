@@ -463,7 +463,13 @@ class PolicyRepo(ABC):
             self.rng, *sub_rngs = jr.split(self.rng, 4)
 
             if mode == "greedy":
-                assignments = jnp.argmax(raw_scores, axis=0)
+                # Random tie-breaking via policy permutation.
+                # When a column has a unique max the permutation is a no-op;
+                # when multiple policies tie, the one landing first after
+                # shuffle wins — without ever touching the score values.
+                perm = jr.permutation(sub_rngs[2], self.num_policies)
+                assignments_permuted = jnp.argmax(raw_scores[perm, :], axis=0)
+                assignments = perm[assignments_permuted]
 
             elif mode == "softmax":
                 tau = self.config.get("assignment_temperature", 0.1)
@@ -491,13 +497,19 @@ class PolicyRepo(ABC):
             # Safety net 1: every policy gets at least one active env
             for p in range(self.num_policies):
                 if not mask[:, p].any():
-                    best_env = jnp.argmax(raw_scores[p, :])
+                    self.rng, tie_key = jr.split(self.rng)
+                    env_perm = jr.permutation(tie_key, E_subset)
+                    scores_perm = raw_scores[p, env_perm]
+                    best_env = env_perm[jnp.argmax(scores_perm)]
                     mask = mask.at[best_env, p].set(True)
 
             # Safety net 2: every env gets assigned to at least one policy
             for e in range(E_subset):
                 if not mask[e, :].any():
-                    best_policy = jnp.argmax(raw_scores[:, e])
+                    self.rng, tie_key = jr.split(self.rng)
+                    pol_perm = jr.permutation(tie_key, self.num_policies)
+                    scores_perm = raw_scores[pol_perm, e]
+                    best_policy = pol_perm[jnp.argmax(scores_perm)]
                     mask = mask.at[e, best_policy].set(True)
 
             return mask
