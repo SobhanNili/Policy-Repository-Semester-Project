@@ -15,5 +15,8 @@ python scripts/run.py --repo policy_latent --sigma 0.3
 python scripts/run.py --repo policy_latent --sigma 0.5
 python scripts/run.py --repo policy_latent --sigma 0.7
 
-python scripts/run.py --repo performance
+python scripts/run.py --repo performance --mode rank
+python scripts/run.py --repo performance --mode solve_rate
+python scripts/run.py --repo performance --mode hybrid
+
 python scripts/run.py --repo random
