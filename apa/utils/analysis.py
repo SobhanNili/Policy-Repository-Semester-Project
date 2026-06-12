@@ -516,7 +516,7 @@ def _plot_per_env_spearman(data, plots_dir, rho_key, title, filename):
 
     ax.axhline(0, color="gray", ls="--", lw=1, label=r"$\rho = 0$")
     ax.set_ylim(-1.05, 1.05)
-    ax.set_xlabel("Repo Step")
+    ax.set_xlabel("Repository Training Step")
     ax.set_ylabel(r"Spearman $\rho$ per Environment")
     ax.set_title(title)
     ax.legend(loc="lower right")
@@ -1173,6 +1173,70 @@ def collect_experiment_results(
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# Eval assignment checkerboard data collection
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _collect_eval_assignments(df: pd.DataFrame) -> dict | None:
+    """Load ``env2policy`` from each run's ``eval_frozen_results.pkl``.
+
+    Args:
+        df: DataFrame from ``collect_experiment_results``.
+
+    Returns:
+        dict with keys:
+            assignment_matrix  — (max_E, N) float; policy index, NaN where
+                                 a run has fewer eval envs than the max.
+            run_labels         — list of N strings (compact per-run labels).
+            repo_types         — list of N strings (repo_type per run).
+            num_policies       — int; inferred from the max policy index.
+        Returns None when no valid pkl files are found.
+    """
+    records: list[dict] = []
+    max_E = 0
+
+    for _, row in df.iterrows():
+        pkl_path = Path(row["run_dir"]) / "eval_frozen_results.pkl"
+        if not pkl_path.exists():
+            continue
+        with open(pkl_path, "rb") as f:
+            _, env2policy, _ = pickle.load(f)
+        env2policy = np.asarray(env2policy, dtype=int)
+        max_E = max(max_E, len(env2policy))
+        records.append({
+            "env2policy": env2policy,
+            "repo_type": row["repo_type"],
+            "row": row,
+        })
+
+    if not records:
+        return None
+
+    N = len(records)
+    assignment = np.full((max_E, N), np.nan)
+    for j, rec in enumerate(records):
+        E = len(rec["env2policy"])
+        assignment[:E, j] = rec["env2policy"]
+
+    # Build labels (compact: display name + key hyperparams + dir tail)
+    varying_cols = _get_varying_hyperparam_cols(df)
+    run_labels = [
+        _build_run_label(rec["row"], varying_cols=varying_cols,
+                         max_dir_chars=14)
+        for rec in records
+    ]
+
+    max_policy = int(np.nanmax(assignment))
+    num_policies = max_policy + 1
+
+    return {
+        "assignment_matrix": assignment,
+        "run_labels": run_labels,
+        "repo_types": [rec["repo_type"] for rec in records],
+        "num_policies": num_policies,
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # Comparison plot functions
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -1486,6 +1550,195 @@ def plot_per_env_distributions(
     plt.close(fig)
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# Eval assignment checkerboard plot
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _draw_column_group_backgrounds(
+    ax: plt.Axes,
+    repo_types: np.ndarray,  # (N,) sorted
+    unique_repos: np.ndarray,
+    N: int,
+    E: int,
+) -> None:
+    """Subtle alternating background bands and thin coloured accent lines
+    to visually group columns by repo type."""
+    for i, rt in enumerate(unique_repos):
+        idx = np.where(repo_types == rt)[0]
+        if len(idx) == 0:
+            continue
+        x_start = idx[0]
+        x_end = idx[-1] + 1
+
+        # Alternating light background
+        if i % 2 == 1:
+            ax.axvspan(x_start, x_end, ymin=0, ymax=1,
+                       facecolor="#f4f4f4", zorder=0, linewidth=0)
+
+        # Thin repo-coloured accent line at top of group
+        color = _get_color_for_repo(rt)
+        ax.plot([x_start, x_end], [E, E],
+                color=color, lw=2.5, solid_capstyle="butt",
+                clip_on=False, zorder=8)
+
+
+def plot_eval_assignment_checkerboard(
+    df: pd.DataFrame,
+    plots_dir: Path,
+    title: str | None = None,
+    filename: str = "eval_assignment_checkerboard.png",
+) -> None:
+    """Checkerboard heatmap: which policy each eval env was assigned to,
+    across compared experiment runs.
+
+    **Rows** = evaluation environments (E₀ … E_{max}).
+    **Columns** = experiment runs, sorted and grouped by ``repo_type``.
+
+    Cell colour encodes the assigned policy (greedy argmax over affinity).
+    Columns are grouped by repo type via subtle alternating backgrounds
+    and thin accent lines; a compact legend identifies each repo.
+
+    Saved to ``plots_dir / filename``.
+    """
+    data = _collect_eval_assignments(df)
+    if data is None:
+        print("Warning: no eval assignment data found — "
+              "skipping checkerboard plot.")
+        return
+
+    assignment = data["assignment_matrix"]   # (E, N)
+    E, N = assignment.shape
+    P = data["num_policies"]
+    repo_types = np.array(data["repo_types"])
+    run_labels = np.array(data["run_labels"])
+
+    # ── Sort columns: by repo_type, then alphabetically by label ───────
+    sort_idx = np.lexsort((run_labels, repo_types))
+    assignment = assignment[:, sort_idx]
+    repo_types = repo_types[sort_idx]
+    run_labels = run_labels[sort_idx]
+
+    # ── Repo-type groups ───────────────────────────────────────────────
+    unique_repos = np.unique(repo_types)
+    num_repos = len(unique_repos)
+    boundaries = []
+    for i in range(1, N):
+        if repo_types[i] != repo_types[i - 1]:
+            boundaries.append(i)
+
+    # ── Policy colour map (pastel) ─────────────────────────────────────
+    policy_palette = sns.color_palette("pastel", max(P, 3))[:P]
+    policy_cmap = ListedColormap(policy_palette)
+    policy_cmap.set_bad("#fafafa")
+
+    # ── Figure geometry ────────────────────────────────────────────────
+    col_width = max(0.28, min(0.52, 10.0 / max(N, 1)))
+    fig_width = max(7, N * col_width + 2.2)
+    row_height = max(0.20, min(0.42, 8.0 / max(E, 1)))
+    fig_height = max(4, E * row_height + 1.3)
+
+    fig, ax = plt.subplots(figsize=(fig_width, fig_height),
+                           facecolor="white")
+    fig.subplots_adjust(left=0.08, right=0.91, top=0.93, bottom=0.14)
+
+    # ── Column-group backgrounds (only when >1 repo type) ──────────────
+    if num_repos > 1:
+        _draw_column_group_backgrounds(ax, repo_types, unique_repos, N, E)
+
+    # ── Heatmap ────────────────────────────────────────────────────────
+    X = np.arange(N + 1)
+    Y = np.arange(E + 1)
+    masked = np.ma.masked_invalid(assignment)
+
+    mesh = ax.pcolormesh(
+        X, Y, masked, cmap=policy_cmap,
+        vmin=-0.5, vmax=P - 0.5,
+        edgecolors="white", linewidth=0.5,
+        shading="flat", antialiased=True,
+    )
+
+    # ── Repo-group separator lines ─────────────────────────────────────
+    for b in boundaries:
+        ax.axvline(b, color="#ffffff", lw=3.5, zorder=5)
+        ax.axvline(b, color="#cccccc", lw=0.5, alpha=0.6, zorder=6)
+
+    # ── Axis ticks ─────────────────────────────────────────────────────
+    label_fs = 8.0 if N <= 12 else (7.0 if N <= 25 else 6.0)
+    ax.set_xticks(np.arange(N) + 0.5)
+    ax.set_xticklabels(run_labels, rotation=50, ha="right",
+                       fontsize=label_fs)
+
+    ax.set_yticks(np.arange(E) + 0.5)
+    y_fs = 8.5 if E <= 30 else (7.0 if E <= 60 else 5.5)
+    ax.set_yticklabels([f"E{i}" for i in range(E)], fontsize=y_fs)
+
+    # ── Policy colour bar ──────────────────────────────────────────────
+    cbar_ax = fig.add_axes([0.925, 0.16, 0.020, 0.70])
+    cbar = fig.colorbar(mesh, cax=cbar_ax, ticks=np.arange(P))
+    cbar.set_label("Policy", fontsize=9, labelpad=4)
+    cbar.ax.set_yticklabels([f"P{p}" for p in range(P)], fontsize=7.5)
+    cbar.outline.set_visible(False)
+
+    # ── Repo-type legend (compact, inside figure) ──────────────────────
+    if num_repos > 1:
+        legend_handles = [
+            mpatches.Patch(facecolor=_get_color_for_repo(rt),
+                           edgecolor="#dddddd", linewidth=0.5,
+                           label=_get_display_name(rt))
+            for rt in unique_repos
+        ]
+        leg = fig.legend(
+            handles=legend_handles, loc="lower center",
+            ncol=min(num_repos, 6), fontsize=7.5, frameon=True,
+            handlelength=1.0, handleheight=0.9,
+            columnspacing=1.0,
+            edgecolor="#e0e0e0", facecolor="white",
+            borderpad=0.4, labelspacing=0.3,
+        )
+        leg.get_frame().set_linewidth(0.5)
+
+    # ── Labels & title ─────────────────────────────────────────────────
+    ax.set_ylabel("Evaluation Environment", fontsize=10, labelpad=4)
+    if title is None:
+        title = "Evaluation Environment → Policy Assignment (Greedy Argmax)"
+    ax.set_title(title, fontsize=11, fontweight="bold", pad=8)
+
+    ax.set_xlim(0, N)
+    ax.set_ylim(0, E)
+    ax.invert_yaxis()
+
+    for spine in ("top", "right"):
+        ax.spines[spine].set_visible(False)
+
+    plots_dir.mkdir(parents=True, exist_ok=True)
+    fig.savefig(plots_dir / filename, dpi=200, bbox_inches="tight",
+                facecolor="white", edgecolor="none")
+    plt.close(fig)
+    print(f"Saved eval assignment checkerboard to {plots_dir / filename}")
+
+
+def plot_per_repo_checkerboards(
+    df: pd.DataFrame,
+    plots_dir: Path,
+) -> None:
+    """For each repo type, produce an eval assignment checkerboard comparing
+    its own hyperparameter configurations.
+
+    One ``eval_checkerboard_{repo_type}.png`` file is saved per repo type.
+    """
+    for repo_type in sorted(df["repo_type"].unique()):
+        sub_df = df[df["repo_type"] == repo_type]
+        if sub_df.empty:
+            continue
+        display = _get_display_name(repo_type)
+        plot_eval_assignment_checkerboard(
+            sub_df,
+            plots_dir,
+            title=f"{display} — Eval Assignment per Configuration",
+            filename=f"eval_checkerboard_{repo_type}.png",
+        )
+
+
 # ── Public entry point ───────────────────────────────────────────────────────
 
 def generate_comparison_plots(
@@ -1536,6 +1789,17 @@ def generate_comparison_plots(
     # ── Per-env distributions (all runs) ────────────────────────────────
     if outputs_root is not None:
         plot_per_env_distributions(df, plots_dir)
+
+    # ── Eval assignment checkerboards ───────────────────────────────────
+    plot_per_repo_checkerboards(df, plots_dir)
+
+    if not best_df.empty:
+        plot_eval_assignment_checkerboard(
+            best_df,
+            plots_dir,
+            title="Best Configuration Per Repo Type — Eval Assignment",
+            filename="eval_checkerboard_best.png",
+        )
 
     # ── Save summary CSV ────────────────────────────────────────────────
     metric_cols = [
