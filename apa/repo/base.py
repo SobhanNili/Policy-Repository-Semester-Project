@@ -480,7 +480,8 @@ class PolicyRepo(ABC):
 
             elif mode == "epsilon_greedy":
                 eps = self.config.get("assignment_epsilon", 0.1)
-                greedy = jnp.argmax(raw_scores, axis=0)
+                perm = jr.permutation(sub_rngs[2], self.num_policies)
+                greedy = perm[jnp.argmax(raw_scores[perm, :], axis=0)]
                 random_ = jr.randint(sub_rngs[0], (E_subset,), 0, self.num_policies)
                 use_random = jr.uniform(sub_rngs[1], (E_subset,)) < eps
                 assignments = jnp.where(use_random, random_, greedy)
@@ -543,7 +544,9 @@ class PolicyRepo(ABC):
                 - eval_metrics: (E_eval, 2) array with [solve_rate, avg_return] for each eval env under its assigned policy.
             """
             affinity = self.compute_affinity(eval_env_reset_states)
-            env2policy = jnp.argmax(affinity, axis=0)
+            self.rng, tie_key = jr.split(self.rng)
+            perm = jr.permutation(tie_key, self.num_policies)
+            env2policy = perm[jnp.argmax(affinity[perm, :], axis=0)]
             eval_metrics = self.evaluate_pairing(env2policy, eval_env_reset_states,
                                                   rollout_steps=self.eval_rollout_steps,
                                                   params=self.policy_repo.train_state.params,
@@ -648,7 +651,9 @@ class PolicyRepo(ABC):
             """
             num_steps = int(self.config.get("evaluate_finetune_steps", 5))
             affinity = self.compute_affinity(eval_env_reset_states)
-            env2policy = jnp.argmax(affinity, axis=0)  # (E_eval,)
+            self.rng, tie_key = jr.split(self.rng)
+            perm = jr.permutation(tie_key, self.num_policies)
+            env2policy = perm[jnp.argmax(affinity[perm, :], axis=0)]  # (E_eval,)
             E_eval = env2policy.shape[0]
 
             metrics = self._finetune_and_evaluate(
