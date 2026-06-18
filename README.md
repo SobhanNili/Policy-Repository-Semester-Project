@@ -9,6 +9,7 @@ The following need to be installed based on the available cuda version:
 
 - Torch: `uv pip install torch torchvision --index-url https://download.pytorch.org/whl/cu126`
 
+TODO: setting up huggingface token for DINOv3
 
 > To train the transformer policy network on randomly generated environments with periodic checkpointing, use `thirdparty/kinetix/experiments/bacbone.py` script. Corresponding config is at `../configs/backbone.yaml`
 
