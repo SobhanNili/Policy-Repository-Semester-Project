@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Submit each experiment as a separate Run:AI job."""
 
+import time
 import subprocess
 import sys
+from datetime import datetime
 
 # Base runai arguments
 BASE = [
@@ -16,19 +18,19 @@ BASE = [
 # ── Define every experiment as (job_name, python_command) ──────────────────
 EXPERIMENTS = [
     # Dino sweeps
-    ("dino-sigma-0.3",  "python scripts/run.py --repo dino --sigma 0.3"),
-    ("dino-sigma-0.5",  "python scripts/run.py --repo dino --sigma 0.5"),
-    ("dino-sigma-0.7",  "python scripts/run.py --repo dino --sigma 0.7"),
+    ("dino-sigma-0-3",  "python scripts/run.py --repo dino --sigma 0.3"),
+    ("dino-sigma-0-5",  "python scripts/run.py --repo dino --sigma 0.5"),
+    ("dino-sigma-0-7",  "python scripts/run.py --repo dino --sigma 0.7"),
 
     # Morphology sweeps
-    ("morph-sigma-0.15", "python scripts/run.py --repo morphology --sigma 0.15"),
-    ("morph-sigma-0.3",  "python scripts/run.py --repo morphology --sigma 0.3"),
-    ("morph-sigma-0.5",  "python scripts/run.py --repo morphology --sigma 0.5"),
+    ("morph-sigma-0-15", "python scripts/run.py --repo morphology --sigma 0.15"),
+    ("morph-sigma-0-3",  "python scripts/run.py --repo morphology --sigma 0.3"),
+    ("morph-sigma-0-5",  "python scripts/run.py --repo morphology --sigma 0.5"),
 
     # Policy latent sweeps
-    ("policy-sigma-0.3", "python scripts/run.py --repo policy_latent --sigma 0.3"),
-    ("policy-sigma-0.5", "python scripts/run.py --repo policy_latent --sigma 0.5"),
-    ("policy-sigma-0.7", "python scripts/run.py --repo policy_latent --sigma 0.7"),
+    ("policy-sigma-0-3", "python scripts/run.py --repo policy_latent --sigma 0.3"),
+    ("policy-sigma-0-5", "python scripts/run.py --repo policy_latent --sigma 0.5"),
+    ("policy-sigma-0-7", "python scripts/run.py --repo policy_latent --sigma 0.7"),
 
     # Performance sweeps
     ("perf-rank",      "python scripts/run.py --repo performance --mode rank"),
@@ -56,13 +58,13 @@ def main():
         )
 
         submit_cmd = BASE + [
-            "--name", job_name,
+            "--name", job_name + '-' + datetime.now().strftime("%Y-%m-%d-%H-%M-%S"),
             "--", "bash", "-c", full_cmd,
         ]
 
         print(f"🚀 Submitting {job_name} ...")
-        subprocess.run(submit_cmd, check=False)
-        # (check=False so a single failure doesn't kill the whole script)
+        subprocess.run(submit_cmd)
+        time.sleep(2)
 
 
 if __name__ == "__main__":

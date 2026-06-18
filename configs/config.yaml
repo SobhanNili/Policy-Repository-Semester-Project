@@ -15,7 +15,7 @@ defaults:
     - model-transformer        # transformer_depth, transformer_size, num_heads
     - model-perm-invariant-mlp # symbolic_embedding_dim, encoder_size (compatibility)
   - train_levels: train_all    # list of training levels; set to "random" for procedural
-  - eval: s                    # held-out evaluation level set (set to null to use eval_ratio)
+  - eval: null                    # held-out evaluation level set (set to null to use eval_ratio)
   - learning:
     - ppo-base                 # lr, gamma, clip_eps, gae_lambda, ent_coef, etc.
     - ppo-rnn                  # num_steps, num_repeats (recurrent rollout config)
