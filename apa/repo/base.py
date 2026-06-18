@@ -429,7 +429,7 @@ class PolicyRepo(ABC):
             mask = jnp.zeros((E_subset, self.num_policies), dtype=bool)
             mask = mask.at[jnp.arange(E_subset), assignments].set(True)
 
-            # Safety net 1: every policy gets at least one active env
+            # Safety net: every policy gets at least one active env
             for p in range(self.num_policies):
                 if not mask[:, p].any():
                     self.rng, sub_rng = jr.split(self.rng)
@@ -437,15 +437,6 @@ class PolicyRepo(ABC):
                     scores_perm = raw_scores[p, env_perm]
                     best_env = env_perm[jnp.argmax(scores_perm)]
                     mask = mask.at[best_env, p].set(True)
-
-            # Safety net 2: every env gets assigned to at least one policy
-            for e in range(E_subset):
-                if not mask[e, :].any():
-                    self.rng, sub_rng = jr.split(self.rng)
-                    pol_perm = jr.permutation(sub_rng, self.num_policies)
-                    scores_perm = raw_scores[pol_perm, e]
-                    best_policy = pol_perm[jnp.argmax(scores_perm)]
-                    mask = mask.at[e, best_policy].set(True)
 
             return mask
 
