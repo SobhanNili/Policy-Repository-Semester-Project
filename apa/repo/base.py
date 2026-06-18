@@ -368,6 +368,26 @@ class PolicyRepo(ABC):
             """
             pass
 
+        def _greedy_assign(self, eval_env_reset_states) -> tuple[jax.Array, jax.Array]:
+            """Compute affinity and derive greedy env→policy assignment.
+
+            Shared by ``evaluate_frozen`` and ``evaluate_finetune``.
+
+            Args:
+                eval_env_reset_states: pytree of evaluation env reset states.
+
+            Returns:
+                (affinity, env2policy):
+                - affinity: (P, E_eval) raw scores from ``compute_affinity``.
+                - env2policy: (E_eval,) per-column argmax with random tie-breaking.
+            """
+            affinity = self.compute_affinity(eval_env_reset_states)
+            E_eval = affinity.shape[1]
+            self.rng, sub_rng = jr.split(self.rng)
+            col_rngs = jr.split(sub_rng, E_eval)
+            env2policy = jax.vmap(_greedy_argmax_per_column)(col_rngs, affinity.T)
+            return affinity, env2policy
+
         def derive_assignment_mask(self, raw_scores: jax.Array) -> jax.Array:
             """Derives (E_subset, P) binary active mask from raw affinity scores.
 
@@ -468,16 +488,32 @@ class PolicyRepo(ABC):
                 - env2policy: (E_eval,) array mapping each eval env to its assigned policy
                 - eval_metrics: (E_eval, 2) array with [solve_rate, avg_return] for each eval env under its assigned policy.
             """
-            affinity = self.compute_affinity(eval_env_reset_states)
-            E_eval = affinity.shape[1]
-            self.rng, sub_rng = jr.split(self.rng)
-            col_rngs = jr.split(sub_rng, E_eval)
-            env2policy = jax.vmap(_greedy_argmax_per_column)(col_rngs, affinity.T)
+            affinity, env2policy = self._greedy_assign(eval_env_reset_states)
             eval_metrics = self.evaluate_pairing(env2policy, eval_env_reset_states,
                                                   rollout_steps=self.eval_rollout_steps,
                                                   params=self.policy_repo.train_state.params,
                                                   hstate=self.policy_repo.hstate)
             return affinity, env2policy, eval_metrics
+
+        def _slice_policy_state(self, indices: jax.Array) -> tuple[TrainState, jax.Array]:
+            """Slice the policy repository state to select specific policies.
+
+            Args:
+                indices: (N,) int array of policy indices to select.
+
+            Returns:
+                (train_state, hstate) sliced to the selected policies.
+            """
+            ts = self.policy_repo.train_state
+            sliced_ts = TrainState(
+                step=ts.step[indices],
+                apply_fn=ts.apply_fn,
+                params=jax.tree.map(lambda x: x[indices], ts.params),
+                tx=ts.tx,
+                opt_state=jax.tree.map(lambda x: x[indices], ts.opt_state),
+            )
+            sliced_h = jax.tree.map(lambda x: x[indices], self.policy_repo.hstate)
+            return sliced_ts, sliced_h
 
         def _finetune_and_evaluate(self, policy_indices, env_indices,
                                     env_states, num_steps, output_shape):
@@ -503,25 +539,7 @@ class PolicyRepo(ABC):
             N = policy_indices.shape[0]
             C = self.num_copies_per_env
 
-            # Copy params for all N pseudo-policies
-            ft_params = jax.tree.map(
-                lambda x: x[policy_indices], self.policy_repo.train_state.params
-            )
-            ft_opt_state = jax.tree.map(
-                lambda x: x[policy_indices], self.policy_repo.train_state.opt_state
-            )
-            ft_step = self.policy_repo.train_state.step[policy_indices]
-            ft_hstate = jax.tree.map(
-                lambda x: x[policy_indices], self.policy_repo.hstate
-            )
-
-            ft_train_state = TrainState(
-                step=ft_step,
-                apply_fn=self.policy_repo.train_state.apply_fn,
-                params=ft_params,
-                tx=self.policy_repo.train_state.tx,
-                opt_state=ft_opt_state,
-            )
+            ft_train_state, ft_hstate = self._slice_policy_state(policy_indices)
 
             # Select envs and duplicate: (N, C, ...)
             selected_envs = jax.tree.map(
@@ -576,11 +594,7 @@ class PolicyRepo(ABC):
                   for each eval env under its fine-tuned assigned policy.
             """
             num_steps = int(self.config.get("evaluate_finetune_steps", 5))
-            affinity = self.compute_affinity(eval_env_reset_states)
-            E_eval = affinity.shape[1]
-            self.rng, sub_rng = jr.split(self.rng)
-            col_rngs = jr.split(sub_rng, E_eval)
-            env2policy = jax.vmap(_greedy_argmax_per_column)(col_rngs, affinity.T)  # (E_eval,)
+            affinity, env2policy = self._greedy_assign(eval_env_reset_states)
             E_eval = env2policy.shape[0]
 
             metrics = self._finetune_and_evaluate(
