@@ -151,13 +151,20 @@ def _unpack_step_logs(step_logs: list) -> dict:
     )  # (T, E_subset)
 
     # ── Greedy-assignment matrix: (num_envs, T) ─────────────────────────
+    # -1  = contested (multiple policies tied for max)
+    # NaN = not sampled at this step
+    # 0..P-1 = clear winner (unique argmax)
     num_envs = int(candidate_env_indices.max()) + 1
     assignment = np.full((num_envs, T), np.nan)
     for t in range(T):
         for local_i in range(E_subset):
             env_idx = int(candidate_env_indices[t, local_i])
-            policy_idx = int(np.argmax(affinities[t, :, local_i]))
-            assignment[env_idx, t] = policy_idx
+            col = affinities[t, :, local_i]
+            tied = np.where(np.isclose(col, col.max()))[0]
+            if len(tied) == 1:
+                assignment[env_idx, t] = int(tied[0])
+            else:
+                assignment[env_idx, t] = -1
 
     return {
         "T": T,
@@ -418,18 +425,18 @@ def _plot_assignment_heatmap(data, plots_dir, colors):
 
     Rows = individual training environments (0 … E−1).
     Columns = repo steps.
-    Cell color = which policy would be assigned by pure argmax (before
-    safety nets).  White cells = env was not in the candidate set that step.
-
-    Solid horizontal bands indicate stable ownership; flickering rows
-    indicate contested environments.
+    Cell color = which policy has the unique highest affinity (before
+    safety nets).  Grey cells = contested (multiple policies tied).
+    White cells = env was not in the candidate set that step.
     """
-    assignment = data["assignment"]   # (num_envs, T) — NaN where not sampled
+    assignment = data["assignment"]   # (num_envs, T) — -1=contested, NaN=not sampled
     num_envs, T = data["num_envs"], data["T"]
     P = data["P"]
 
-    cmap = ListedColormap(colors)
-    cmap.set_bad("whitesmoke")
+    contested_color = "#bdbdbd"  # distinct medium grey for ties
+    all_colors = [contested_color] + list(colors)  # index 0 = contested, 1..P = policies
+    cmap = ListedColormap(all_colors)
+    cmap.set_bad("whitesmoke")  # not sampled
 
     # Proportional height so individual rows stay legible
     fig_height = np.clip(num_envs * 0.15, 4, 20)
@@ -441,13 +448,13 @@ def _plot_assignment_heatmap(data, plots_dir, colors):
 
     mesh = ax.pcolormesh(
         X, Y, masked, cmap=cmap,
-        vmin=-0.5, vmax=P - 0.5,
+        vmin=-1.5, vmax=P - 0.5,
         edgecolors="none", linewidth=0, shading="flat",
     )
 
-    cbar = plt.colorbar(mesh, ax=ax, ticks=np.arange(P))
+    cbar = plt.colorbar(mesh, ax=ax, ticks=np.arange(-1, P))
     cbar.set_label("Assigned Policy")
-    cbar.ax.set_yticklabels([f"Policy {p}" for p in range(P)])
+    cbar.ax.set_yticklabels(["Contested"] + [f"Policy {p}" for p in range(P)])
 
     ax.set_xlabel("Repository Training Step")
     ax.set_ylabel("Environment Index")

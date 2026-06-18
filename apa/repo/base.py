@@ -19,6 +19,24 @@ def get_pytree_batch_size(pytree):
     leaf = jax.tree_util.tree_leaves(pytree)[0]
     return leaf.shape[0]
 
+def _greedy_argmax_per_column(rng: jax.Array, col_scores: jax.Array) -> jax.Array:
+    """Greedy argmax with per-column random tie-breaking.
+
+    When multiple entries share the maximum value, the winner is chosen
+    uniformly at random among the tied entries via policy permutation.
+    When there is a unique maximum, the permutation is a no-op.
+
+    Args:
+        rng: JAX random key (scalar).
+        col_scores: (P,) float array of scores for one environment column.
+
+    Returns:
+        Scalar integer policy index.
+    """
+    num_policies = col_scores.shape[0]
+    perm = jr.permutation(rng, num_policies)
+    return perm[jnp.argmax(col_scores[perm])]
+
 class PolicyState(NamedTuple): # supposed to be vmapped. Skill index is same as the batch index
     train_state: TrainState # includes params
     hstate: jax.Array # sake of compatibility
@@ -368,30 +386,38 @@ class PolicyRepo(ABC):
             """
             mode = self.config.get("assignment_mode", "greedy")
             E_subset = raw_scores.shape[1]
-            self.rng, *sub_rngs = jr.split(self.rng, 4)
 
             if mode == "greedy":
-                # Random tie-breaking via policy permutation.
-                # When a column has a unique max the permutation is a no-op;
-                # when multiple policies tie, the one landing first after
-                # shuffle wins — without ever touching the score values.
-                perm = jr.permutation(sub_rngs[2], self.num_policies)
-                assignments_permuted = jnp.argmax(raw_scores[perm, :], axis=0)
-                assignments = perm[assignments_permuted]
+                # Per-column random tie-breaking.
+                # Each environment column gets its own independent policy
+                # permutation, so tied policies win uniformly at random
+                # across environments — not all collapsing to one policy.
+                self.rng, sub_rng = jr.split(self.rng)
+                col_rngs = jr.split(sub_rng, E_subset)
+                assignments = jax.vmap(_greedy_argmax_per_column)(
+                    col_rngs, raw_scores.T
+                )
 
             elif mode == "softmax":
                 tau = self.config["assignment_temperature"]
                 probs = jax.nn.softmax(raw_scores / tau, axis=0)
+                self.rng, sub_rng = jr.split(self.rng)
                 assignments = jax.random.categorical(
-                    sub_rngs[0], jnp.log(probs + 1e-12), axis=0
+                    sub_rng, jnp.log(probs + 1e-12), axis=0
                 )
 
             elif mode == "epsilon_greedy":
                 eps = self.config["assignment_epsilon"]
-                perm = jr.permutation(sub_rngs[2], self.num_policies)
-                greedy = perm[jnp.argmax(raw_scores[perm, :], axis=0)]
-                random_ = jr.randint(sub_rngs[0], (E_subset,), 0, self.num_policies)
-                use_random = jr.uniform(sub_rngs[1], (E_subset,)) < eps
+                # Greedy branch: per-column random tie-breaking.
+                self.rng, sub_rng = jr.split(self.rng)
+                col_rngs = jr.split(sub_rng, E_subset)
+                greedy = jax.vmap(_greedy_argmax_per_column)(
+                    col_rngs, raw_scores.T
+                )
+                self.rng, sub_rng = jr.split(self.rng)
+                random_ = jr.randint(sub_rng, (E_subset,), 0, self.num_policies)
+                self.rng, sub_rng = jr.split(self.rng)
+                use_random = jr.uniform(sub_rng, (E_subset,)) < eps
                 assignments = jnp.where(use_random, random_, greedy)
 
             else:
@@ -406,8 +432,8 @@ class PolicyRepo(ABC):
             # Safety net 1: every policy gets at least one active env
             for p in range(self.num_policies):
                 if not mask[:, p].any():
-                    self.rng, tie_key = jr.split(self.rng)
-                    env_perm = jr.permutation(tie_key, E_subset)
+                    self.rng, sub_rng = jr.split(self.rng)
+                    env_perm = jr.permutation(sub_rng, E_subset)
                     scores_perm = raw_scores[p, env_perm]
                     best_env = env_perm[jnp.argmax(scores_perm)]
                     mask = mask.at[best_env, p].set(True)
@@ -415,8 +441,8 @@ class PolicyRepo(ABC):
             # Safety net 2: every env gets assigned to at least one policy
             for e in range(E_subset):
                 if not mask[e, :].any():
-                    self.rng, tie_key = jr.split(self.rng)
-                    pol_perm = jr.permutation(tie_key, self.num_policies)
+                    self.rng, sub_rng = jr.split(self.rng)
+                    pol_perm = jr.permutation(sub_rng, self.num_policies)
                     scores_perm = raw_scores[pol_perm, e]
                     best_policy = pol_perm[jnp.argmax(scores_perm)]
                     mask = mask.at[e, best_policy].set(True)
@@ -452,9 +478,10 @@ class PolicyRepo(ABC):
                 - eval_metrics: (E_eval, 2) array with [solve_rate, avg_return] for each eval env under its assigned policy.
             """
             affinity = self.compute_affinity(eval_env_reset_states)
-            self.rng, tie_key = jr.split(self.rng)
-            perm = jr.permutation(tie_key, self.num_policies)
-            env2policy = perm[jnp.argmax(affinity[perm, :], axis=0)]
+            E_eval = affinity.shape[1]
+            self.rng, sub_rng = jr.split(self.rng)
+            col_rngs = jr.split(sub_rng, E_eval)
+            env2policy = jax.vmap(_greedy_argmax_per_column)(col_rngs, affinity.T)
             eval_metrics = self.evaluate_pairing(env2policy, eval_env_reset_states,
                                                   rollout_steps=self.eval_rollout_steps,
                                                   params=self.policy_repo.train_state.params,
@@ -559,9 +586,10 @@ class PolicyRepo(ABC):
             """
             num_steps = int(self.config.get("evaluate_finetune_steps", 5))
             affinity = self.compute_affinity(eval_env_reset_states)
-            self.rng, tie_key = jr.split(self.rng)
-            perm = jr.permutation(tie_key, self.num_policies)
-            env2policy = perm[jnp.argmax(affinity[perm, :], axis=0)]  # (E_eval,)
+            E_eval = affinity.shape[1]
+            self.rng, sub_rng = jr.split(self.rng)
+            col_rngs = jr.split(sub_rng, E_eval)
+            env2policy = jax.vmap(_greedy_argmax_per_column)(col_rngs, affinity.T)  # (E_eval,)
             E_eval = env2policy.shape[0]
 
             metrics = self._finetune_and_evaluate(
