@@ -1,4 +1,5 @@
 from apa.repo.base import PolicyRepo, PolicyState, RepoStepLog
+from apa.repo.embedding_matching import EmbeddingMatchingRepo
 from apa.repo.random_matching import RandomMatchingRepo
 from apa.repo.morphology_matching import MorphologyMatchingRepo
 from apa.repo.performance_matching import PerformanceMatchingRepo
