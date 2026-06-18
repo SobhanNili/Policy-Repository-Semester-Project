@@ -26,7 +26,7 @@ class PolicyLatentMatchingRepo(PolicyRepo):
         super().__init__(config, train_env_reset_states, rng)
 
         # ── Build the embedding function from checkpoint ──────────────────
-        from apa.utils.embedding import make_embedding_fn
+        from apa.utils.transformer_policy_embedding import make_embedding_fn
 
         self._encode = make_embedding_fn(config, checkpoint_path)
         self._encode = jax.jit(self._encode)

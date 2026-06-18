@@ -1,14 +1,14 @@
 from abc import ABC, abstractmethod
 import jax.numpy as jnp
-from apa.utils.network import make_network, init_random_policy, init_network_from_params
+from apa.utils.network import make_network, init_random_policy
 from apa.utils.ppo import make_ppo_step, perform_generic_jitted_rollout
-from apa.utils.log import frames_to_wandb_video
 from kinetix.render.renderer_pixels import make_render_pixels_rl
 from apa.utils.env import make_env_from_config, duplicate_env_states
 import jax.random as jr
 import jax.numpy as jnp
 import jax
-import wandb
+from typing import NamedTuple
+from flax.training.train_state import TrainState
 import numpy as np
 from tqdm.auto import tqdm
 
@@ -18,13 +18,6 @@ def get_pytree_element_by_index(pytree, i):
 def get_pytree_batch_size(pytree):
     leaf = jax.tree_util.tree_leaves(pytree)[0]
     return leaf.shape[0]
-
-from itertools import chain
-def flatten_python_2d_nested_list(nested_list):
-    return list(chain.from_iterable(nested_list))
-
-from typing import NamedTuple, Optional
-from flax.training.train_state import TrainState
 
 class PolicyState(NamedTuple): # supposed to be vmapped. Skill index is same as the batch index
     train_state: TrainState # includes params
@@ -150,83 +143,6 @@ class PolicyRepo(ABC):
                 )
 
             return PolicyState(train_state, hstate)
-        
-        # def log_vids2wandb(self, candidate_env_indices, affinity, active_mask):
-        #     """Logs evaluation videos to wandb.
-
-        #     For each policy, selects the env with the highest affinity among those
-        #     active for that policy, and runs a frozen-policy rollout for video capture.
-        #     """
-        #     P = self.num_policies
-        #     # For each policy p, pick the active env with highest affinity
-        #     best_env_indices = []
-        #     for p in range(P):
-        #         # Mask out inactive envs for this policy
-        #         masked_aff = jnp.where(active_mask[:, p], affinity[p, :], -jnp.inf)
-        #         best_local_idx = jnp.argmax(masked_aff)
-        #         best_env_indices.append(candidate_env_indices[best_local_idx])
-        #     best_env_indices = jnp.array(best_env_indices)  # (P,)
-
-        #     # One env per policy (single copy)
-        #     reset_states = jax.tree.map(lambda x: x[best_env_indices, 0], self.batched_train_env_reset_states)
-        #     env_state = reset_states
-        #     obs = jax.vmap(self.env.get_obs)(env_state.env_state)
-
-        #     hstate = jax.tree.map(lambda x: x[:, 0], self.policy_repo.hstate)
-        #     params = self.policy_repo.train_state.params
-
-        #     network_apply, env_step = self._make_eval_closures(P, render_pixels=True)
-
-        #     self.rng, rollout_rng = jax.random.split(self.rng)
-        #     video_frames = perform_generic_jitted_rollout(
-        #         network_apply, env_step, params, hstate, env_state, obs,
-        #         reset_states, rollout_rng, self.env_params.max_timesteps
-        #     )
-
-        #     video_frames = np.array(video_frames)
-        #     data2log = {"repo_step": self.repo_step_counter}
-
-        #     for i in range(P):
-        #         vid = frames_to_wandb_video(video_frames[:, i])
-        #         env_id = int(best_env_indices[i])
-        #         data2log[f"videos/policy_{i}_env_{env_id}"] = wandb.Video(vid, fps=15, format="gif")
-
-        #     wandb.log(data2log)
-
-        # def log_step2wandb(self, candidate_env_indices, affinity, active_mask, perf_metrics):
-        #     """Logs per-step structured data to wandb.
-
-        #     Args:
-        #         candidate_env_indices: (E_subset,)
-        #         affinity: (P, E_subset)
-        #         active_mask: (E_subset, P)
-        #         perf_metrics: (P, E_subset, 2) — [solve_rate, avg_return], NaN where inactive.
-        #     """
-        #     data2log = {"repo_step": self.repo_step_counter}
-        #     P = self.num_policies
-
-        #     solve_rate = perf_metrics[:, :, 0]  # (P, E_subset)
-        #     avg_return = perf_metrics[:, :, 1]  # (P, E_subset)
-
-        #     for policy_idx in range(P):
-        #         # Per-policy metrics: mean over active envs only (ignoring NaN)
-        #         sr = solve_rate[policy_idx]
-        #         ar = avg_return[policy_idx]
-        #         active = active_mask[:, policy_idx]
-        #         active_sr = sr[active]
-        #         active_ar = ar[active]
-
-        #         mean_sr = np.nanmean(np.array(active_sr)) if len(active_sr) > 0 else 0.0
-        #         mean_ar = np.nanmean(np.array(active_ar)) if len(active_ar) > 0 else 0.0
-        #         num_active = int(jnp.sum(active))
-
-        #         data2log.update({
-        #             f'ep_return/policy_{policy_idx}': mean_ar,
-        #             f'solve_rate/policy_{policy_idx}': mean_sr,
-        #             f'num_active_envs/policy_{policy_idx}': num_active,
-        #         })
-
-        #     wandb.log(data2log)
 
         def _make_eval_closures(self, n_pairs: int, render_pixels: bool = False):
             """Factory for (network_apply, env_step) closures used in frozen-policy rollouts.
@@ -405,18 +321,10 @@ class PolicyRepo(ABC):
             self.update(policy_state, candidate_env_indices, affinity,
                         active_mask, post_frozen)
 
-            # ── 8. WandB logging ──────────────────────────────────────
-            # if self.config['use_wandb']:
-            #     self.log_step2wandb(candidate_env_indices, affinity, active_mask, perf_metrics)
-            #     video_logging_freq = self.config.get('video_frequency', None)
-            #     if video_logging_freq is not None and self.repo_step_counter % video_logging_freq == 0:
-            #         self.log_vids2wandb(candidate_env_indices, affinity, active_mask)
-
             self.repo_step_counter += 1
 
         def sample_candidate_envs(self) -> jax.Array:
-            """Samples candidate_pool_size distinct envs uniformly at random.
-            Override in subclasses for custom sampling (e.g. ConstantMatchingRepo)."""
+            """Samples candidate_pool_size distinct envs uniformly at random"""
             self.rng, sub_rng = jr.split(self.rng)
             return jr.choice(sub_rng, self.num_distinct_envs,
                              shape=(self.candidate_pool_size,), replace=False)
@@ -472,14 +380,14 @@ class PolicyRepo(ABC):
                 assignments = perm[assignments_permuted]
 
             elif mode == "softmax":
-                tau = self.config.get("assignment_temperature", 0.1)
+                tau = self.config["assignment_temperature"]
                 probs = jax.nn.softmax(raw_scores / tau, axis=0)
                 assignments = jax.random.categorical(
                     sub_rngs[0], jnp.log(probs + 1e-12), axis=0
                 )
 
             elif mode == "epsilon_greedy":
-                eps = self.config.get("assignment_epsilon", 0.1)
+                eps = self.config["assignment_epsilon"]
                 perm = jr.permutation(sub_rngs[2], self.num_policies)
                 greedy = perm[jnp.argmax(raw_scores[perm, :], axis=0)]
                 random_ = jr.randint(sub_rngs[0], (E_subset,), 0, self.num_policies)
