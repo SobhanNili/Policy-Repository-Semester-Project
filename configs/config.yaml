@@ -15,7 +15,7 @@ defaults:
     - model-transformer        # transformer_depth, transformer_size, num_heads
     - model-perm-invariant-mlp # symbolic_embedding_dim, encoder_size (compatibility)
   - train_levels: train_all    # list of training levels; set to "random" for procedural
-  - eval: s                    # held-out evaluation level set
+  - eval: s                    # held-out evaluation level set (set to null to use eval_ratio)
   - learning:
     - ppo-base                 # lr, gamma, clip_eps, gae_lambda, ent_coef, etc.
     - ppo-rnn                  # num_steps, num_repeats (recurrent rollout config)
@@ -42,6 +42,7 @@ candidate_pool_size: 6        # distinct envs randomly sampled per repo step;
                               #   must satisfy (candidate_pool_size × num_copies_per_env) % num_minibatches == 0
 
 # ── Evaluation ───────────────────────────────────────────────────────────────
+eval_ratio: 0.2               # train/eval split ratio (used when eval config is null)
 eval_rollout_steps: 512       # rollout steps for frozen-policy evaluation;
                               #   environments auto-reset after 256 steps (Kinetix truncation)
 evaluate_finetune_steps: 100    # PPO steps for per-env fine-tuning in evaluate_finetune;
@@ -56,11 +57,6 @@ diagnostic_finetune_frequency: 2  # Run diagnostic fine-tuning every N repo step
 assignment_mode: greedy       # "greedy" (argmax), "softmax", or "epsilon_greedy"
 assignment_temperature: 0.1   # softmax temperature (only used when mode = softmax)
 assignment_epsilon: 0.1       # exploration probability (only used when mode = epsilon_greedy)
-
-# ── Logging ───────────────────────────────────────────────────────────────────
-use_wandb: false              # set to true to log metrics & videos to Weights & Biases
-wandb_runname: "experiment"   # run name prefix shown in the wandb dashboard
-video_frequency: 1            # log evaluation videos every N repo steps (null = never)
 
 # Override kinetix defaults for the repository setting
 learning:

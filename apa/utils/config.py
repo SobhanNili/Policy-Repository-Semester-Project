@@ -7,7 +7,7 @@ def normalise_config(config):
     keys = ["env", "learning", "model", "misc", "eval", "ued",
             "env_size", "train_levels", "repo"]
     for k in keys:
-        if k not in config:
+        if k not in config or config[k] is None:
             config[k] = {}
         small_d = config[k]
         del config[k]

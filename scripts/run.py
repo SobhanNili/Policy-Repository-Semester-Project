@@ -39,8 +39,6 @@ import pandas as pd
 from tqdm.auto import tqdm
 from loguru import logger
 
-import wandb  # noqa: E402
-
 from apa.utils.analysis import generate_plots, save_env_observations  # noqa: E402
 
 from apa.utils.config import load_config  # noqa: E402
@@ -218,8 +216,9 @@ def _extract_repo_kwargs(config: dict, kwargs_keys: list[str],
 def setup_environments(config: dict, rng: jax.Array):
     """Create training and evaluation environments from config.
 
-    Returns (env, env_params, static_env_params, train_env_reset_states, rng).
-    Mutates config["num_train_envs"] when loading from level lists.
+    Returns (env, env_params, static_env_params, train_env_reset_states,
+             eval_env_reset_states, rng).
+    Mutates config["num_train_envs"] when loading from level lists or splitting.
     """
     env, env_params, static_env_params = make_env_from_config(config)
 
@@ -235,30 +234,37 @@ def setup_environments(config: dict, rng: jax.Array):
         )
         config["num_train_envs"] = len(config["train_levels_list"])
 
-    eval_env_reset_states = load_levels(config["eval_levels"], static_env_params_override=static_env_params)
+    # Determine eval environments
+    if "eval_levels" in config:
+        if "eval_ratio" in config:
+            logger.warning("eval_ratio is ignored when eval config is provided.")
+        eval_env_reset_states = load_levels(
+            config["eval_levels"],
+            static_env_params_override=static_env_params,
+        )
+    else:
+        if "eval_ratio" not in config:
+            raise ValueError(
+                "eval_ratio must be specified when eval config is null."
+            )
+        ratio = float(config["eval_ratio"])
+        if not 0 < ratio < 1:
+            raise ValueError(f"eval_ratio must be in (0, 1), got {ratio}")
+
+        total = config["num_train_envs"]
+        rng, sub_rng = jr.split(rng)
+        perm = jr.permutation(sub_rng, jnp.arange(total))
+        n_eval = max(1, int(total * ratio))
+
+        eval_env_reset_states = jax.tree.map(
+            lambda x: x[perm[:n_eval]], train_env_reset_states
+        )
+        train_env_reset_states = jax.tree.map(
+            lambda x: x[perm[n_eval:]], train_env_reset_states
+        )
+        config["num_train_envs"] = total - n_eval
 
     return env, env_params, static_env_params, train_env_reset_states, eval_env_reset_states, rng
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# WandB setup (mirrors notebook)
-# ──────────────────────────────────────────────────────────────────────────────
-
-
-def setup_wandb(config: dict) -> None:
-    """Initialize wandb if config['use_wandb'] is True."""
-    if not config.get("use_wandb", False):
-        return
-    wandb.init(
-        project="Policy Repo",
-        config=dict(config),
-        name=config.get("wandb_runname", None),
-    )
-    wandb.define_metric("repo_step")
-    wandb.define_metric("videos/*", step_metric="repo_step")
-    wandb.define_metric("solve_rate/*", step_metric="repo_step")
-    wandb.define_metric("ep_length/*", step_metric="repo_step")
-    wandb.define_metric("ep_return/*", step_metric="repo_step")
 
 
 # (generate_plots lives in apa/utils/analysis.py)
@@ -354,9 +360,6 @@ def main(argv: list[str] | None = None) -> None:
     run_dir.mkdir(parents=True, exist_ok=False)
     logger.info(f"Output directory: {run_dir}")
 
-    # ── WandB setup ─────────────────────────────────────────────────────────
-    setup_wandb(config)
-
     # ── RNG ─────────────────────────────────────────────────────────────────
     rng = jr.PRNGKey(config["seed"])
     logger.info(f"JAX devices: {jax.devices()}")
@@ -427,10 +430,6 @@ def main(argv: list[str] | None = None) -> None:
             logger.warning("Warning: No step_logs collected — skipping plots.")
     else:
         logger.info("Plots skipped (--skip-plots).")
-
-    # ── Cleanup ─────────────────────────────────────────────────────────────
-    if config.get("use_wandb", False):
-        wandb.finish()
 
     logger.info(f"Done. All outputs in {run_dir}")
 
