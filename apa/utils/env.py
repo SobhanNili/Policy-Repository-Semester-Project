@@ -7,9 +7,7 @@ import jax
 import jax.random as jr
 import jax.numpy as jnp
 
-from typing import TYPE_CHECKING
-if TYPE_CHECKING:
-    from kinetix.environment.env_state import EnvState, EnvParams, StaticEnvParams
+from kinetix.environment.env_state import EnvParams, StaticEnvParams # tupe checking
 
 def make_env_from_config(config) -> tuple[LogWrapper, EnvParams, StaticEnvParams]:
     """Create an environment template from config. Config has the same structure as in the Kinetix repo.

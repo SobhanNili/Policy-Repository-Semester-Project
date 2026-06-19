@@ -5,11 +5,9 @@ import jax
 import jax.numpy as jnp
 from flax.serialization import to_state_dict
 
-from typing import TYPE_CHECKING
-if TYPE_CHECKING:
-    from kinetix.environment.env_state import EnvParams, StaticEnvParams
-    from kinetix.environment import LogWrapper
-    from kinetix.models.transformer_model import ActorCriticTransformer
+# type checking
+from kinetix.environment.env_state import EnvParams, StaticEnvParams  
+from kinetix.environment import LogWrapper
 
 def make_network(config,env: LogWrapper,env_params: EnvParams,static_env_params: StaticEnvParams):
     """Create the policy network template (logic) from config and environment parameters.
