@@ -185,7 +185,7 @@ def _unpack_step_logs(step_logs: list) -> dict:
         "spearman_pre_frozen": spearman_pre_frozen,
         "spearman_pre_finetune": spearman_pre_finetune,
         "spearman_post_frozen": spearman_post_frozen,
-        "assignment": assignment,
+        "assignment": assignment
     }
 
 
@@ -890,8 +890,6 @@ def generate_plots(step_logs: list, output_dir: Path) -> None:
     plots_dir = output_dir / "plots"
     plots_dir.mkdir(parents=True, exist_ok=True)
 
-    sns.set_theme(style="whitegrid", palette="muted", font_scale=1.1)
-
     data = _unpack_step_logs(step_logs)
     colors = sns.color_palette("muted", data["P"])
 
@@ -913,12 +911,6 @@ def generate_plots(step_logs: list, output_dir: Path) -> None:
         title="Affinity Score - Solve Rate Spearman Correlation (Finetuned Evaluation)",
         filename="affinity_sr_spearman_finetune.png",
     )
-    # _plot_per_env_spearman(
-    #     data, plots_dir,
-    #     rho_key="spearman_post_frozen",
-    #     title="Affinity–Solve Rate Spearman ρ (Post-Training Frozen)",
-    #     filename="spearman_post_frozen.png",
-    # )
 
     # ── Per-step assignment grid images ─────────────────────────────────
     # Use a sensible default interval: roughly 20 grids across training
@@ -999,6 +991,7 @@ REPO_DISPLAY_NAMES: dict[str, str] = {
     "dino_matching":            "DINO",
     "policy_latent_matching":   "Policy Latent",
     "performance_matching":     "Performance",
+    'generalist_matching':      "Generalist",
 }
 
 
@@ -1745,8 +1738,45 @@ def plot_per_repo_checkerboards(
             filename=f"eval_checkerboard_{repo_type}.png",
         )
 
+def plot_adjusted_rand_score_heatmap(df: pd.DataFrame, plots_dir: Path) -> None:
+    """Heatmap of pairwise Adjusted Rand Index between eval assignments
+    of the best configuration per repo type."""
+    from sklearn.metrics import adjusted_rand_score
+
+    best_df = _select_best_per_repo(df)
+    data = _collect_eval_assignments(best_df)
+    if data is None or data["assignment_matrix"].shape[1] < 2:
+        return
+
+    assignment = data["assignment_matrix"].astype(int)
+    N = assignment.shape[1]
+    labels = [_get_display_name(rt) for rt in data["repo_types"]]
+
+    ari = np.eye(N)
+    for i in range(N):
+        for j in range(i + 1, N):
+            ari[i, j] = adjusted_rand_score(assignment[:, i], assignment[:, j])
+            ari[j, i] = ari[i, j]
+
+    with sns.plotting_context("notebook"), sns.axes_style("white"):
+        fig, ax = plt.subplots(figsize=(max(6, N * 1.0), max(5, N * 0.85)))
+        sns.heatmap(
+            ari, annot=False, fmt=".3f", cmap="RdYlBu_r",
+            vmin=-0.5, vmax=1, center=0, square=True,
+            xticklabels=labels, yticklabels=labels,
+            linewidths=0.5, linecolor="white",
+            cbar_kws={"label": "Adjusted Rand Index", "shrink": 0.8},
+            ax=ax,
+        )
+        ax.set_title("Eval Assignment Similarity — Adjusted Rand Index")
+
+    plots_dir.mkdir(parents=True, exist_ok=True)
+    fig.savefig(plots_dir / "adjusted_rand_heatmap.png", dpi=150,
+                bbox_inches="tight")
+    plt.close(fig)    
 
 # ── Public entry point ───────────────────────────────────────────────────────
+
 
 def generate_comparison_plots(
     df: pd.DataFrame,
@@ -1771,7 +1801,6 @@ def generate_comparison_plots(
         plots_dir: directory to save plots and ``comparison_summary.csv``.
     """
     plots_dir.mkdir(parents=True, exist_ok=True)
-    sns.set_theme(style="whitegrid", palette="muted", font_scale=1.1)
 
     # ── Per-repo-type plots ────────────────────────────────────────────
     plot_per_repo_comparison_bars(df, plots_dir)
@@ -1807,6 +1836,7 @@ def generate_comparison_plots(
             title="Best Configuration Per Repo Type — Eval Assignment",
             filename="eval_checkerboard_best.png",
         )
+        plot_adjusted_rand_score_heatmap(df, plots_dir)
 
     # ── Save summary CSV ────────────────────────────────────────────────
     metric_cols = [
