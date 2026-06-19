@@ -1,3 +1,5 @@
+"""PPO update logic and frozen trajectory collection. Logic similar to Kinetix training loop, which comes from PureJaxRL. Some assumptions regarding the batch handling is changed from there to enable multi-policy training on the same set of environments, with per-policy active environment masking."""
+
 import jax
 import jax.numpy as jnp
 from functools import partial
@@ -12,15 +14,16 @@ class Transition(NamedTuple):
     obs: Any
     info: Any
 
-
 def ppo_update(config, train_state, traj, advantages, targets, init_hstate, rng, env_mask=None):
-    """PPO update with optional per-env loss masking.
+    """
+    Perform one PPO epoch for a policy on a collected trajectory batch with per-environment loss masking.
+    Logic refactored from the Kinetix training loop (which comes from PureJaxRL).
 
     Args:
-        env_mask: optional (B,) boolean or float mask. 1.0 = active, 0.0 = inactive.
-                  Inactive envs contribute zero gradient.  If None, all envs are active.
+        train_state: Policy Flax TrainState object. Single policy.
+        env_mask: optional (B,) float/bool mask. 1.0 = active env for the policy, contributing to its update.
     """
-    # Normalise mask: None → all ones; ensure float32
+    # Normalise mask: None → all ones (default is all active). Ensure float32 dtype
     if env_mask is None:
         env_mask = jnp.ones(traj.action.shape[1], dtype=jnp.float32)
     else:
@@ -33,7 +36,7 @@ def ppo_update(config, train_state, traj, advantages, targets, init_hstate, rng,
         value_pred_clipped = traj_batch.value + (value - traj_batch.value).clip(
             -config["clip_eps"], config["clip_eps"]
         )
-        # Masked value loss — mask is (B_mb,) broadcast over action dims if any
+        # Masked value loss. Mask is (B_minibatch,) broadcast over action dims if any
         per_env_value_loss = 0.5 * jnp.maximum(
             jnp.square(value - targets),
             jnp.square(value_pred_clipped - targets),
@@ -60,7 +63,7 @@ def ppo_update(config, train_state, traj, advantages, targets, init_hstate, rng,
     grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
 
     # Permute the main batch elements and the mask separately because
-    # the mask has batch on axis 0 (no leading time dimension).
+    # the mask has batch on axis 0 (no leading timestep dimension).
     permutation = jax.random.permutation(rng, traj.action.shape[1])
     batch_no_mask = (init_hstate, traj, advantages, targets)
     batch_no_mask = jax.tree.map(lambda x: jnp.take(x, permutation, axis=1), batch_no_mask)
@@ -74,7 +77,7 @@ def ppo_update(config, train_state, traj, advantages, targets, init_hstate, rng,
         ),
         tuple(batch_no_mask),
     )
-    # Mask: (B,) → (num_minibatches, B_per_mb)
+    # Mask: (B,) → (num_minibatches, B_per_minibatch)
     mask_arr = jnp.reshape(mask_permuted, [config["num_minibatches"], -1])
 
     def minibatch_update(train_state, batch):
@@ -94,6 +97,9 @@ def ppo_update(config, train_state, traj, advantages, targets, init_hstate, rng,
 
 
 def ppo_rollout(config, env, env_params, train_state, hstate, obs, env_state, rng, reset_state_override=None):
+    """ 
+    Collect a trajectory of length T (``num_steps`` from config) for a single policy on ``B`` envs.
+    """
     batch_size = jax.tree_util.tree_leaves(obs)[0].shape[0]
     init_hstate = hstate
 
@@ -150,9 +156,22 @@ def ppo_rollout(config, env, env_params, train_state, hstate, obs, env_state, rn
 
 def make_ppo_step(config, env, env_params):
     def ppo_step(train_state, hstate, obs, env_state, rollout_rngs, update_rngs, reset_state_override=None, env_mask=None):
-        """Executes PPO rollout + update for all policies.
+        """Chain PPO rollout collection and policy update, forming a full update step. JIT-ed expecting static config, env, and env_params.
+
+        Designed for multi-policy training where ``P`` policies train over the same ``B`` set of environments.
+        The ``env_mask`` zeroes out gradient contributions from inactive envs per policy, enabling fixed-shape JIT
+        compilation despite differing per-policy active sets.
 
         Args:
+            train_state: Flax TrainState object containing the policy network parameters and optimizer state. Leading shape (P, ...)
+            hstate: RNN hidden state for the policy network. Leading shape (P, ...). Here as we don't use the RNN variant of ActorCritic, it is just a placeholder for the API compatibility.
+            obs: Env observations. Leading pytree shape (P, B, ...)
+            env_state: Env states for each policy. Leading shape (P, B, ...)
+            rollout_rngs: JAX PRNG keys for each policy. Leading shape (P, ...)
+            update_rngs: JAX PRNG keys for each policy. Leading shape (P, ...)
+            reset_state_override: optional (P, B, ...) pytree of environment states to use for resetting environments during the rollout.
+                If None, the environment's default reset logic is used, WHICH IS RANDOM INITILIZATION, MEANING THAT THE ENV WILL CHANGE TO A RANDOM STATE AFTER ONLY ONE EPISODE.
+                SO MAKE SURE TO PASS A RESET STATE IF YOU WANT TO KEEP THE ENVIRONMENT FIXED FOR EVALUATION, WHICH YOU SHOULD.
             env_mask: optional (P, B) float/bool mask. 1.0 = active env for that policy.
                       Passed through to ppo_update for loss masking.
         """
@@ -182,10 +201,11 @@ def make_ppo_step(config, env, env_params):
     return jax.jit(ppo_step)
 
 @partial(jax.jit, static_argnames=['network_apply', 'env_step', 'rollout_length'])
-def perform_generic_jitted_rollout(network_apply, env_step, params, hstate, env_state, obs, resets, rng, rollout_length):
+def perform_rollout(network_apply, env_step, params, hstate, env_state, obs, resets, rng, rollout_length):
     """
-    A generic jitted rollout utility function.
-    Given matching Pytrees constraints sizes (usually P x B matrices setup), rolls out execution for given steps.
+    JIT-ed rollout for ``N`` parallel (policy, env) pairs over rollout_length steps. Used for frozen policy evaluation.
+
+    All pytree args share a leading ``N`` axis, which is the number of independent (policy, env) pairs being evaluated in parallel.
     """
     def eval_step(carry, _):
         env_state, obs, hstate, step_rng = carry
@@ -193,11 +213,12 @@ def perform_generic_jitted_rollout(network_apply, env_step, params, hstate, env_
         # Split rng for action selection
         step_rng, pi_rng = jax.random.split(step_rng)
         
-        # Usually obs needs an extra time dimension prepended -> (1, ...) for the network apply
-        # We assume the caller handles whatever dimension constraints inside network_apply closure
+        # Dimension handling (time/batch axes) is delegated to network_apply closure
         hstate, pi = network_apply(params, hstate, obs)
         
-        action = jnp.squeeze(pi.sample(seed=pi_rng)) # Removes the temporary Time dim
+        # Not using the greedy choice of the policy, but rather sampling from its distribution.
+        # FIXME: A debatable design choice.
+        action = jnp.squeeze(pi.sample(seed=pi_rng)) # Removes the temporary timestep dim
         
         step_rng, env_rng = jax.random.split(step_rng)
         

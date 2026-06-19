@@ -1,9 +1,12 @@
-"""Extract pre-head embeddings from a Kinetix ActorCriticTransformer checkpoint.
+"""Extract embeddings just before the actor/critic heads of ActorCriticTransformer using a frozen a saved checkpoint.
 
-This module loads a trained checkpoint, strips the actor/critic head parameters,
-and exposes a pure JAX function that maps ``EntityObservation`` → L2-normalized
-embedding vectors suitable for environment similarity matching (analogous to how
-``DinoMatchingRepo`` uses DINO embeddings).
+Loads a trained checkpoint, strips the actor/critic head parameters,
+and exposes a pure JAX function that passes environment observations through the frozen network, obtaining the pre-head embedding.
+
+Needed for parts of the network architecture code to be dublicated from the original model.
+
+Use `scripts/train_ppo.py` to train a model and save a checkpoint, then use this module to load the checkpoint and extract embeddings.
+Config used between training and embedding extraction must match naturally.
 """
 
 from __future__ import annotations
@@ -19,17 +22,12 @@ from flax.linen.initializers import constant, orthogonal
 from kinetix.models.transformer_model import Transformer
 
 
-# ── Helpers ─────────────────────────────────────────────────────────────────
-
 def _mask_out_inactives(flat_active_mask, matrix_attention_mask):
     """Replicate of the local function inside ActorCriticTransformer.__call__."""
     return matrix_attention_mask & (flat_active_mask[:, None]) & (flat_active_mask[None, :])
 
-
-# ── Param filtering ─────────────────────────────────────────────────────────
-
 def _is_head_param(path: tuple[str, ...]) -> bool:
-    """Return True if *path* belongs to the actor/critic head (GeneralActorCriticRNN).
+    """Return True if param in the `path` belongs to the actor/critic head of the GeneralActorCriticRNN.
 
     Flax params are stored as ``{'params': {'Dense_0': ..., 'GeneralActorCriticRNN_0': ...}}``,
     so flattened keys look like ``('GeneralActorCriticRNN_0', 'Dense_0', 'bias')``.
@@ -40,9 +38,8 @@ def _is_head_param(path: tuple[str, ...]) -> bool:
         and (path[1].startswith("Dense_") or path[1] == "log_std")
     )
 
-
 def _filter_backbone_params(full_params: dict) -> dict:
-    """Strip ``GeneralActorCriticRNN_0`` entries from a Flatten-able param dict."""
+    """Strip ``GeneralActorCriticRNN_0`` entries from a flatten-able param dict."""
     from flax.traverse_util import flatten_dict, unflatten_dict
 
     flat = flatten_dict(full_params)
@@ -50,16 +47,11 @@ def _filter_backbone_params(full_params: dict) -> dict:
     return unflatten_dict(backbone_flat)
 
 
-# ── Extractor module ────────────────────────────────────────────────────────
-
 class TransformerEmbeddingExtractor(nn.Module):
-    """Replicates the ``ActorCriticTransformer`` backbone exactly.
-
-    The submodule structure (encoder ``Dense`` layers, ``Transformer`` block)
-    is identical to ``ActorCriticTransformer`` so that checkpoint parameter
+    """Replicates the ``ActorCriticTransformer`` backbone (pre actor/critic heads) so that checkpoint parameter
     names align automatically after stripping the head entries.
 
-    Stops *before* ``GeneralActorCriticRNN`` — returns the pooled embedding.
+    Includes up to the ``GeneralActorCriticRNN`` (where backone part ends) to isloate the backbone and returns the pooled embedding.
     """
 
     transformer_size: int
@@ -67,7 +59,7 @@ class TransformerEmbeddingExtractor(nn.Module):
     transformer_depth: int
     num_heads: int
     activation: str
-    aggregate_mode: str          # "dummy" | "mean" | "dummy_and_mean"
+    aggregate_mode: str          # "dummy" | "mean" | "dummy_and_mean" (coming from config)
     full_attention_mask: bool
 
     @nn.compact
@@ -79,7 +71,7 @@ class TransformerEmbeddingExtractor(nn.Module):
         og_obs, dones = x
         obs = og_obs  # EntityObservation  (T, B, N, L)
 
-        # ── Entity encoders (identical to ActorCriticTransformer) ──────────
+        # Object encoders (identical to ActorCriticTransformer)
         def _single_encoder(features, entity_id, concat=True):
             num_to_remove = 1 if concat else 0
             emb = activation(
@@ -105,7 +97,7 @@ class TransformerEmbeddingExtractor(nn.Module):
         joint_indexes = obs.joint_indexes
         thruster_indexes = obs.thruster_indexes
 
-        # ── Optional dummy token ───────────────────────────────────────────
+        # Optional dummy token
         if self.aggregate_mode in ("dummy", "dummy_and_mean"):
             T, B, _, K = circle_encodings.shape
             dummy = jnp.ones((T, B, 1, K))
@@ -129,7 +121,7 @@ class TransformerEmbeddingExtractor(nn.Module):
             overall_mask = jnp.ones(overall_mask.shape, dtype=bool)
             overall_mask = jax.vmap(jax.vmap(_mask_out_inactives))(shape_mask, overall_mask)
 
-        # ── Transformer ────────────────────────────────────────────────────
+        # extraction of per-token embedding from backbone
         embedding = Transformer(
             num_layers=self.transformer_depth,
             num_heads=self.num_heads,
@@ -148,7 +140,7 @@ class TransformerEmbeddingExtractor(nn.Module):
             thruster_indexes,
         )
 
-        # ── Pool ───────────────────────────────────────────────────────────
+        # Pool the embedding across token representation based on the aggregation mode.
         if self.aggregate_mode in ("mean", "dummy_and_mean"):
             embedding = jnp.mean(embedding, axis=2, where=shape_mask[..., None])
         else:
@@ -157,25 +149,22 @@ class TransformerEmbeddingExtractor(nn.Module):
         return embedding  # (T, B, transformer_encoder_size)
 
 
-# ── Public API ──────────────────────────────────────────────────────────────
-
+# Public API
 def make_embedding_fn(
     config: dict[str, Any],
     checkpoint_path: str,
 ) -> Callable[[Any], jnp.ndarray]:
-    """Build a function that encodes entity observations → L2-normalized embeddings.
+    """Factory for building a pure function that encodes env observations and outputs L2-normalized embeddings.
+    Uses a frozen checkpoint of a trained ActorCriticTransformer model, stripping the actor/critic head parameters.
 
     Args:
-        config: Flat configuration dict (from ``load_config``).  Must contain
-            ``transformer_size``, ``transformer_encoder_size``,
-            ``transformer_depth``, ``num_heads``, ``activation``,
-            ``aggregate_mode``, ``full_attention_mask``.
-        checkpoint_path: Path to a ``full_model.pbz2`` checkpoint.
+        config: configuration dict with the Kinetix config conventions. Use `utils.config.load_config` to load the config file.
+        checkpoint_path: Path to a ``full_model.pbz2`` checkpoint. Can be trained using ``scripts/train_ppo.py``.
 
     Returns:
         A callable ``encode(obs) -> embeddings`` where embeddings are
-        ``(B, D)`` float32, L2-normalized.  The returned function is pure
-        and can be wrapped with ``jax.jit``.
+        ``(B, D)`` float32, L2-normalized. ``B`` is the batch size for observations and ``D`` is the embedding dimension. 
+        The returned function is pure and can be wrapped with ``jax.jit``.
     """
     from kinetix.util.saving import load_params
 
@@ -209,6 +198,7 @@ def make_embedding_fn(
 
         emb = extractor.apply(backbone_params, hidden, (obs_t, dones))
         emb = jnp.squeeze(emb, axis=0)
+        # FIXME: Usage of L2 normalization rather than not normalizing is debatable here. The network itself does not enforce a fixed range for hidden activations.
         emb = emb / (jnp.linalg.norm(emb, axis=-1, keepdims=True) + 1e-12)
         return emb
 
@@ -216,7 +206,10 @@ def make_embedding_fn(
 
 
 def load_and_validate(checkpoint_path: str, config: dict[str, Any]) -> dict:
-    """Load checkpoint and print diagnostic info.  Returns raw params dict."""
+    """
+    Load checkpoint and print diagnostic info. Returns full params dict.
+    For sake of debugging and checkpoint inspection.
+    """
     from kinetix.util.saving import load_params
     from flax.traverse_util import flatten_dict
 
@@ -235,7 +228,7 @@ def load_and_validate(checkpoint_path: str, config: dict[str, Any]) -> dict:
     backbone_keys = [k for k in flat if not _is_head_param(k)]
 
     print(f"Checkpoint: {checkpoint_path}")
-    print(f"  Step: {payload.get('step', 'N/A')}")
+    print(f"  Training Step: {payload.get('step', 'N/A')}")
     print(f"  Params nesting: {'wrapped' if nested else 'flat'}")
     print(f"  Total param leaves: {len(flat)}")
     print(f"  Backbone leaves:    {len(backbone_keys)}")

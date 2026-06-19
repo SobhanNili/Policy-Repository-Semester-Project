@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 import jax.numpy as jnp
 from apa.utils.network import make_network, init_random_policy
-from apa.utils.ppo import make_ppo_step, perform_generic_jitted_rollout
+from apa.utils.ppo import make_ppo_step, perform_rollout
 from kinetix.render.renderer_pixels import make_render_pixels_rl
 from apa.utils.env import make_env_from_config, duplicate_env_states
 import jax.random as jr
@@ -242,7 +242,7 @@ class PolicyRepo(ABC):
             network_apply, env_step = self._make_eval_closures(n_pairs, render_pixels=False)
 
             self.rng, rollout_rng = jax.random.split(self.rng)
-            info = perform_generic_jitted_rollout(
+            info = perform_rollout(
                 network_apply, env_step, params, hstate, env_state, obs,
                 resets, rollout_rng, rollout_steps
             )
