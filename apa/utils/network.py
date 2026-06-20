@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import optax
 from flax.training.train_state import TrainState
 from kinetix.models import ScannedRNN, make_network_from_config
@@ -5,9 +7,10 @@ import jax
 import jax.numpy as jnp
 from flax.serialization import to_state_dict
 
-# type checking
-from kinetix.environment.env_state import EnvParams, StaticEnvParams  
-from kinetix.environment import LogWrapper
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from kinetix.environment.env_state import EnvParams, StaticEnvParams  
+    from kinetix.environment import LogWrapper
 
 def make_network(config,env: LogWrapper,env_params: EnvParams,static_env_params: StaticEnvParams):
     """Create the policy network template (logic) from config and environment parameters.

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from kinetix.environment.ued.ued import make_reset_fn_from_config
 from kinetix.util import generate_params_from_config, load_evaluation_levels
 from kinetix.environment import LogWrapper
@@ -7,7 +9,9 @@ import jax
 import jax.random as jr
 import jax.numpy as jnp
 
-from kinetix.environment.env_state import EnvParams, StaticEnvParams # tupe checking
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from kinetix.environment.env_state import EnvParams, StaticEnvParams
 
 def make_env_from_config(config) -> tuple[LogWrapper, EnvParams, StaticEnvParams]:
     """Create an environment template from config. Config has the same structure as in the Kinetix repo.
@@ -148,14 +152,9 @@ def count_active_components(env_state) -> jax.Array:
             7: n_blue_shapes   - shapes with role 2 (blue objects)
             8: n_red_shapes    - shapes with role 3 (red objects)
 
-    Example — single env:
-        stats = count_active_components(single_env)
+    Example for single env:
+        stats = count_active_components(env_state)
         print(f"Polygons: {int(stats[0])}, Circles: {int(stats[1])}")
-
-    Example — batch of envs (shape (E, C, ...)):
-        all_stats = jax.vmap(jax.vmap(count_active_components))(env_states)
-        # all_stats shape: (num_envs, num_copies, 9)
-        print(f"Env 0 polys: {int(all_stats[0, 0, 0])}")
     """
     active_polys = env_state.polygon.active
     active_circles = env_state.circle.active
