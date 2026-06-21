@@ -1,11 +1,7 @@
-"""Base class for embedding-based policy–environment matching.
+"""Base class for embedding-based policy <-> environment matching.
 
-Provides the shared RBF-kernel + soft-weighted history architecture used by
-``DinoMatchingRepo``, ``MorphologyMatchingRepo``, and ``PolicyLatentMatchingRepo``.
-
-Subclasses only implement ``_encode_envs`` to produce an embedding vector per
-environment.  Everything else — affinity scoring, history maintenance, and
-the ``update`` hook — is inherited from this class.
+Provides the shared affinity scoring calcluation logic used by reposiotries relying on env-embedding similarity to recent history of envs solves by the policy.
+``DinoMatchingRepo``, ``MorphologyMatchingRepo``, and ``PolicyLatentMatchingRepo``
 """
 
 from abc import ABC, abstractmethod
@@ -17,18 +13,12 @@ import jax.numpy as jnp
 from apa.repo import PolicyRepo, PolicyState
 from apa.repo.base import get_pytree_batch_size
 
-
 class EmbeddingMatchingRepo(PolicyRepo, ABC):
-    """Shared skeleton for embedding-based affinity scoring.
+    """Shared skeleton for embedding-based affinity scoring. Matches environments to policies that have historically performed well on similar environments.
+    Similarity of envrionments is measured in an embedding space via an RBF kernel, and the history of past envs is soft-weighted by recency and solve rate.
 
-    Caches precomputed embeddings for all training environments at init and
-    encodes candidate environments on the fly during ``compute_affinity``.
-    The RBF kernel on L2 distance between embeddings is soft-weighted by
-    ``solve_rate × exp(−decay × age)`` so that successful, recent matches
-    dominate the score for each policy.
-
-    Subclasses must implement:
-        ``_encode_envs(env_reset_states) → (N, D)``
+    Subclasses must implement the mapping between env intial states and embedding vectors via ``_encode_envs``.:
+        ``_encode_envs(env_reset_states) → (N, D)`` where N is the number of environments and D is the embedding dimension.
     """
 
     def __init__(
@@ -44,18 +34,12 @@ class EmbeddingMatchingRepo(PolicyRepo, ABC):
         self.history_decay = history_decay
         self.sigma = sigma
 
-        # Precompute embeddings for all training environments.
-        # Subclass _encode_envs is responsible for any model loading
-        # or feature extraction needed — set those up *before* calling
-        # super().__init__() in the subclass.
         self._env_embeddings = self._encode_envs(train_env_reset_states)  # (E, D)
 
-        # Flat history arrays — built lazily by _rebuild_history.
+        # Flat history arrays, storing the candidate env indices, solve rates, and ages of all past step-log entries, per policy.
         self._hist_envs: Optional[jnp.ndarray] = None  # (P, H)
         self._hist_perf: Optional[jnp.ndarray] = None  # (P, H)
         self._hist_ages: Optional[jnp.ndarray] = None  # (P, H)
-
-    # ── Subclass contract ──────────────────────────────────────────────────
 
     @abstractmethod
     def _encode_envs(self, env_reset_states) -> jnp.ndarray:
@@ -67,24 +51,18 @@ class EmbeddingMatchingRepo(PolicyRepo, ABC):
 
         Returns:
             ``(N, D)`` float array of embeddings ready for L2-distance
-            comparison.  Embedding vectors should already be L2-normalized
-            if the embedding space is isotropic (e.g. DINO, Kinetix); for
-            feature-count vectors a bounded [0, 1] range is sufficient.
+            comparison.
         """
         ...
 
-    # ── Affinity (RBF kernel + soft-weighted history) ──────────────────────
-
     def compute_affinity(self, env_reset_states) -> jax.Array:
-        """RBF-kernel affinity with soft-weighted history.
-
-        Candidate embeddings are computed on the fly via ``_encode_envs``;
-        past-environment embeddings are looked up from the precomputed cache.
+        """RBF-kernel affinity of an env embedding with previous envs with weighting based on solving history.
+        Env embeddings are computed via ``_encode_envs``.
         """
         P = self.num_policies
         E_subset = get_pytree_batch_size(env_reset_states)
 
-        # Encode candidate environments: (E_subset, D)
+        # Encode environments: (E_subset, D)
         pool_embeddings = self._encode_envs(env_reset_states)
 
         # Before any history has accumulated, all scores are uniform.
@@ -92,8 +70,16 @@ class EmbeddingMatchingRepo(PolicyRepo, ABC):
             return jnp.ones((P, E_subset)) / P
 
         def _score_single_policy(past_envs, past_perfs, past_ages):
-            """past_envs: (H,), past_perfs: (H,), past_ages: (H,)"""
-            # Soft weight: solve_rate × recency decay
+            """past_envs: (H,), past_perfs: (H,), past_ages: (H,)
+
+            Logic: 
+            - Compute RBF kernel between candidate envs and past envs
+            - Weight each past env by its solve_rate and recency decay (to favor "recent" "solves")
+            - Return the weighted average of the RBF kernel values for each candidate env
+
+            In essence, this is a soft nearest-neighbor lookup in env embedding space of policy encounters, where the "neighbors" are weighted by how well the policy performed on them recently.
+            """
+            # Soft weight: solve_rate x recency decay
             weights = past_perfs * jnp.exp(-self.history_decay * past_ages)
             # Look up cached embeddings for past environments: (H, D)
             past_embs = self._env_embeddings[past_envs]
@@ -113,8 +99,7 @@ class EmbeddingMatchingRepo(PolicyRepo, ABC):
             self._hist_envs, self._hist_perf, self._hist_ages
         )  # (P, E_subset)
 
-    # ── History maintenance ────────────────────────────────────────────────
-
+    # History maintenance
     def update(
         self,
         policy_state: PolicyState,
@@ -149,7 +134,7 @@ class EmbeddingMatchingRepo(PolicyRepo, ABC):
             envs_list.append(
                 jnp.tile(log.candidate_env_indices[None, :], (self.num_policies, 1))
             )
-            # Replace NaN solve_rate with 0.0 (near-zero weight)
+            # Replace NaN solve_rate with 0.0 (in case of not finishing the env in time limit)
             perf_list.append(jnp.nan_to_num(log.solve_rate, nan=0.0))
             ages_list.append(
                 jnp.full((self.num_policies, E), age, dtype=jnp.float32)
