@@ -21,7 +21,7 @@ class PerformanceMatchingRepo(PolicyRepo):
     policy?"
 
     Three scoring modes:
-      - ``"rank"``: Rank policies per env by average return (1 = best).
+      - ``"return_rank"``: Rank policies per env by average return (1 = best).
         Nonparametric and scale-invariant — handles negative returns and
         dense-reward noise gracefully.  Always produces P distinct affinity
         values per environment.
@@ -38,7 +38,7 @@ class PerformanceMatchingRepo(PolicyRepo):
         config,
         train_env_reset_states,
         rng,
-        mode: str = "rank",
+        mode: str = "return_rank",
         policy_eval_ep_count: int = 3,
         hybrid_return_weight: float = 0.1,
     ) -> None:
@@ -46,7 +46,7 @@ class PerformanceMatchingRepo(PolicyRepo):
             config: Configuration dictionary.
             train_env_reset_states: Training level states, shape ``(E, ...)``.
             rng: JAX random key.
-            mode: Scoring strategy — ``"rank"``, ``"solve_rate"``, or
+            mode: Scoring strategy — ``"return_rank"``, ``"solve_rate"``, or
                 ``"hybrid"``.  See class docstring for details.
             policy_eval_ep_count: Number of episodes per (policy, env) pair
                 for the affinity evaluation rollout.  Each episode is
@@ -57,9 +57,9 @@ class PerformanceMatchingRepo(PolicyRepo):
                 solve rate dominates at typical values.
         """
         super().__init__(config, train_env_reset_states, rng)
-        if mode not in ("rank", "solve_rate", "hybrid"):
+        if mode not in ("return_rank", "solve_rate", "hybrid"):
             raise ValueError(
-                f"Unknown mode '{mode}'; expected 'rank', 'solve_rate', or 'hybrid'"
+                f"Unknown mode '{mode}'; expected 'return_rank', 'solve_rate', or 'hybrid'"
             )
         self.mode = mode
         self.hybrid_return_weight = hybrid_return_weight
@@ -96,7 +96,7 @@ class PerformanceMatchingRepo(PolicyRepo):
         solve_rate = results[:, :, 0]   # (P, E_subset) ∈ [0, 1]
         avg_return = results[:, :, 1]   # (P, E_subset) — may be negative
 
-        if self.mode == "rank":
+        if self.mode == "return_rank":
             # Best policy gets rank 0, worst gets rank P-1.
             # Normalise to [0, 1]: (P-1 - rank) / (P-1)
             #   P=4 → ranks [0,1,2,3] → scores [1.0, 0.67, 0.33, 0.0]

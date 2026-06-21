@@ -180,7 +180,7 @@ def _make_epilog() -> str:
         "Examples:",
         "  python scripts/run.py --repo random",
         "  python scripts/run.py --repo dino --sigma 0.3 --temperature 1.0",
-        "  python scripts/run.py --repo performance --mode rank",
+        "  python scripts/run.py --repo performance --mode return_rank",
         "",
         "Any config key can be overridden via the command line:",
         "  python scripts/run.py --repo dino --seed 42 --num_repo_updates 20",

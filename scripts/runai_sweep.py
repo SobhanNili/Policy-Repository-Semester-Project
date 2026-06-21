@@ -33,12 +33,15 @@ EXPERIMENTS = [
     ("policy-sigma-0-7", "python scripts/run.py --repo policy_latent --sigma 0.7"),
 
     # Performance sweeps
-    ("perf-rank",      "python scripts/run.py --repo performance --mode rank"),
+    ("perf-rank",      "python scripts/run.py --repo performance --mode return_rank"),
     ("perf-solve-rate", "python scripts/run.py --repo performance --mode solve_rate"),
     ("perf-hybrid",    "python scripts/run.py --repo performance --mode hybrid"),
 
     # Random
     ("random", "python scripts/run.py --repo random"),
+
+    # Generalist
+    ("generalist", "python scripts/run.py --repo generalist"),
 ]
 
 
