@@ -217,7 +217,7 @@ def perform_rollout(network_apply, env_step, params, hstate, env_state, obs, res
         hstate, pi = network_apply(params, hstate, obs)
         
         # Not using the greedy choice of the policy, but rather sampling from its distribution.
-        # FIXME: A debatable design choice.
+        # FIXME: A debatable design choice. (Kinetix also does this in examples_inference.py)
         action = jnp.squeeze(pi.sample(seed=pi_rng)) # Removes the temporary timestep dim
         
         step_rng, env_rng = jax.random.split(step_rng)
