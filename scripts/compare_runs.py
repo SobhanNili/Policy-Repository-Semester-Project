@@ -19,12 +19,12 @@ Usage:
     python scripts/compare_runs.py --table-only
 
 Output (saved to ``outputs/run_comparisons/`` by default):
-    comparison_{repo_type}.png          — per-repo-type bar charts comparing
-                                          hyperparam configs within each repo
-    comparison_best.png                 — best config per repo type, side by side
-    frozen_vs_finetune_scatter.png     — scatter: frozen vs finetuned
-    per_env_distributions.png          — violin plot: per-env solve rates
-    comparison_summary.csv             — all metrics in one table
+    # FIXEME: need to Update this list once the actual plots are finalized, but for now expected outputs include:
+    comparison_{repo_type}.png          - per-repo-type bar charts comparing hyperparam configs within each repo
+    comparison_best.png                 - best config per repo type, side by side
+    frozen_vs_finetune_scatter.png      - scatter: frozen vs finetuned
+    per_env_distributions.png           - violin plot: per-env solve rates
+    comparison_summary.csv              - all metrics in one table
 """
 
 import argparse
@@ -73,7 +73,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    # ── Collect results ──────────────────────────────────────────────────
+    # Collect results
     if args.runs:
         run_dirs = [Path(d) for d in args.runs]
         outputs_root = None
@@ -96,7 +96,7 @@ def main() -> None:
         f"{sorted(df['repo_type'].unique())}"
     )
 
-    # ── Filter ────────────────────────────────────────────────────────────
+    # Filter to specific repo types if requested
     if args.filter:
         allowed = set(args.filter.split(","))
         df = df[df["repo_type"].isin(allowed)]
@@ -105,7 +105,7 @@ def main() -> None:
             sys.exit(1)
         logger.info(f"After filtering: {len(df)} runs.")
 
-    # ── Output ────────────────────────────────────────────────────────────
+    # Generate outputs
     if args.table_only:
         pd.set_option("display.max_columns", None)
         pd.set_option("display.width", 240)

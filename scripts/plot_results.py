@@ -1,32 +1,17 @@
 #!/usr/bin/env python3
-"""Regenerate diagnostic plots from a completed run's saved data.
+"""(Re)generate diagnostic plots from a completed experiment run's saved data.
 
-Modes
------
+Usage Examples
+--------------
+Single experiment: python scripts/plot_results.py outputs/dino_matching_2026-06-06_09-17-04/
 
-Single run (positional)::
-
-    python scripts/plot_results.py outputs/dino_matching_2026-06-06_09-17-04/
-
-Batch (--experiments-root)::
-
-    python scripts/plot_results.py --experiments-root outputs/experiments/
+Batch experiment: python scripts/plot_results.py --experiments-root outputs/experiments/
 
 Loads ``step_logs.pkl`` from the given run directory (or each experiment
 subdirectory under *experiments-root*), generates all diagnostic plots, and
 saves them to ``<run_dir>/plots/``.  Any existing ``plots/`` directory is
 deleted first, so re-running with updated plotting code cleanly replaces old
 plots.
-
-Examples:
-    # Re-plot a specific run
-    python scripts/plot_results.py outputs/random_matching_2026-06-05_15-57-42/
-
-    # Re-plot all experiments in bulk
-    python scripts/plot_results.py --experiments-root outputs/experiments/
-
-    # Re-plot the most recent run
-    python scripts/plot_results.py $(ls -dt outputs/*/ | head -1)
 """
 
 import argparse
@@ -38,12 +23,11 @@ from loguru import logger
 
 from apa.utils.analysis import generate_plots
 
-
 def _process_single_run(run_dir: Path) -> None:
     """Load step_logs.pkl from *run_dir* and (re)generate its plots."""
     pkl_path = run_dir / "step_logs.pkl"
     if not pkl_path.exists():
-        logger.warning(f"Skipping {run_dir} — no step_logs.pkl found.")
+        logger.warning(f"Skipping {run_dir} - no step_logs.pkl found.")
         return
 
     logger.info(f"Loading step_logs from {pkl_path} ...")
@@ -51,13 +35,13 @@ def _process_single_run(run_dir: Path) -> None:
         step_logs = pickle.load(f)
     logger.info(f"  Loaded {len(step_logs)} step logs.")
 
-    # ── Remove old plots for a clean slate ──────────────────────────────
+    # Remove old plots (if existing) for a clean slate
     plots_dir = run_dir / "plots"
     if plots_dir.exists():
         logger.info(f"  Removing existing plots/ ...")
         shutil.rmtree(plots_dir)
 
-    # ── Generate fresh plots ─────────────────────────────────────────────
+    # Generate plots
     generate_plots(step_logs, run_dir)
 
 
@@ -71,10 +55,10 @@ def main() -> None:
     mode_group = parser.add_mutually_exclusive_group(required=True)
     mode_group.add_argument(
         "run_dir", type=str, nargs="?", default=None,
-        help="Path to a single run output directory containing step_logs.pkl.",
+        help="Path to a single experiment output directory containing step_logs.pkl.",
     )
     mode_group.add_argument(
-        "--experiments-root", type=str, default=None,
+        "--experiments-root", type=str, default='outputs/experiments/',
         help=(
             "Root directory containing experiment subdirectories. "
             "Plots are regenerated for every subdirectory that contains "
@@ -83,7 +67,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    # ── Batch mode: iterate over experiment subdirectories ──────────────────
+    # Batch mode: iterate over experiment subdirectories
     if args.experiments_root:
         root = Path(args.experiments_root)
         if not root.is_dir():
@@ -108,7 +92,7 @@ def main() -> None:
         logger.info(f"\nAll {len(run_dirs)} experiments plotted.")
         return
 
-    # ── Single-run mode ─────────────────────────────────────────────────────
+    # Single-run mode
     run_dir = Path(args.run_dir)
     if not run_dir.is_dir():
         logger.error(f"Directory not found: {run_dir}")
@@ -116,7 +100,6 @@ def main() -> None:
 
     _process_single_run(run_dir)
     logger.info("Done.")
-
 
 if __name__ == "__main__":
     main()

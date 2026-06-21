@@ -1,25 +1,25 @@
 #!/usr/bin/env python3
-"""Experiment runner for PolicyRepo-based skill repository training.
+"""Experiment runner for policy repository training.
 
-Reads experiment configuration from ``configs/config.yaml`` (Hydra), which
-composes kinetix config groups via ``hydra.searchpath``.  Repo-specific
-hyperparameters are defined in ``configs/repo/<type>.yaml``.
+Reads kinetix-style config from ``configs/config.yaml``
+(which composes kinetix config groups via ``hydra.searchpath``)  
+Repo-specific hyperparameters are defined in ``configs/repo/<type>.yaml``.
 
 Usage:
     python scripts/run.py --repo random
     python scripts/run.py --repo dino --sigma 0.3 --temperature 1.0
-    python scripts/run.py --repo performance --mode rank
+    python scripts/run.py --repo performance --mode hybrid
 
-Repos available: random, pixel, morphology, performance, dino.
+Repos available: random, generalist, morphology, performance, dino, policy_latent.
 Use ``python scripts/run.py --repo <type> --help`` to see repo-specific options.
 
 Each run creates a timestamped output directory containing:
-    - step_logs.pkl      : list of RepoStepLog namedtuples
-    - config.json         : resolved configuration dict (from Hydra)
-    - repo_kwargs.json    : repo-specific constructor kwargs used for this run
-    - eval_frozen.csv     : per-env solve rate & avg return (frozen)
-    - eval_finetune.csv    : per-env solve rate & avg return (finetuned)
-    - plots/              : 7 diagnostic PNG plots
+    - step_logs.pkl         : list of RepoStepLog namedtuples
+    - config.json           : resolved configuration dict (from Hydra)
+    - repo_kwargs.json      : repo-specific constructor kwargs used for this run
+    - eval_frozen.csv       : per-env solve rate & avg return (frozen eval)
+    - eval_finetune.csv     : per-env solve rate & avg return (finetuned eval)
+    - plots/                : diagnostic plots
 """
 
 import argparse
@@ -39,15 +39,15 @@ import pandas as pd
 from tqdm.auto import tqdm
 from loguru import logger
 
-from apa.utils.analysis import generate_plots, save_env_observations  # noqa: E402
+from apa.utils.analysis import generate_plots, save_env_observations
 
-from apa.utils.config import load_config  # noqa: E402
-from apa.utils.env import (  # noqa: E402
+from apa.utils.config import load_config
+from apa.utils.env import (
     get_random_envs,
     load_levels,
     make_env_from_config,
 )
-from apa.repo import (  # noqa: E402
+from apa.repo import (
     DinoMatchingRepo,
     GeneralistMatchingRepo,
     MorphologyMatchingRepo,
@@ -56,14 +56,11 @@ from apa.repo import (  # noqa: E402
     RandomMatchingRepo,
 )
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Repo registry: repo_type string → (class, list of constructor kwargs keys)
-#
+# Repo registry: matching repo_type string → (class, list of constructor kwargs keys)
 # The actual default values for each kwarg live in ``configs/repo/<type>.yaml``
-# and are resolved by Hydra at config-load time.  This registry only needs to
+# and are resolved by Hydra at config-load time. This registry only needs to
 # know which keys to extract from the flattened config dict and pass to the
 # repo constructor.
-# ──────────────────────────────────────────────────────────────────────────────
 
 REPO_REGISTRY: dict[str, tuple[type, list[str]]] = {
     "random_matching":      (RandomMatchingRepo,      []),
@@ -83,11 +80,6 @@ REPO_ALIASES: dict[str, str] = {
     "dino":        "dino_matching",
     "policy_latent": "policy_latent_matching",
 }
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# CLI argument parsing
-# ──────────────────────────────────────────────────────────────────────────────
 
 
 def parse_args(argv: list[str] | None = None) -> tuple[argparse.Namespace, list[str]]:
@@ -132,7 +124,6 @@ def parse_args(argv: list[str] | None = None) -> tuple[argparse.Namespace, list[
     hydra_overrides = _remaining_to_hydra_overrides(remaining)
 
     return args, hydra_overrides
-
 
 def _remaining_to_hydra_overrides(remaining: list[str]) -> list[str]:
     """Convert ``--key value`` pairs to Hydra ``key=value`` overrides.
@@ -192,17 +183,11 @@ def _make_epilog() -> str:
     ]
     return "\n".join(lines)
 
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Environment setup (mirrors notebook)
-# ──────────────────────────────────────────────────────────────────────────────
-
-
 def _extract_repo_kwargs(config: dict, kwargs_keys: list[str],
                          repo_type: str) -> dict[str, Any]:
     """Pull repo constructor kwargs from the flattened config dict.
 
-    Applies any necessary type conversions (e.g. feature_weights list → tuple).
+    Applies any necessary type conversions for args (e.g. feature_weights list → tuple).
     """
     kwargs = {k: config[k] for k in kwargs_keys if k in config}
     # MorphologyMatchingRepo expects feature_weights as a tuple of floats
@@ -221,7 +206,7 @@ def setup_environments(config: dict, rng: jax.Array):
 
     Returns (env, env_params, static_env_params, train_env_reset_states,
              eval_env_reset_states, rng).
-    Mutates config["num_train_envs"] when loading from level lists or splitting.
+    Overwrites config["num_train_envs"] when loading from level lists or splitting to match the number of loaded envs.
     """
     env, env_params, static_env_params = make_env_from_config(config)
 
@@ -269,17 +254,8 @@ def setup_environments(config: dict, rng: jax.Array):
 
     return env, env_params, static_env_params, train_env_reset_states, eval_env_reset_states, rng
 
-
-# (generate_plots lives in apa/utils/analysis.py)
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Serialization helpers
-# ──────────────────────────────────────────────────────────────────────────────
-
-
 def _save_eval_csv(metrics, filepath: Path, label: str = "env") -> None:
-    """Save evaluation metrics as CSV with mean/std summary rows.
+    """Save evaluation metrics as CSV with mean/std (across envs) summary rows.
 
     Args:
         metrics: (E, 2) array with [solve_rate, avg_return] per environment.
@@ -322,19 +298,13 @@ def _sanitize_config(config: dict) -> dict:
             out[k] = str(v)
     return out
 
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Main entry point
-# ──────────────────────────────────────────────────────────────────────────────
-
-
 def main(argv: list[str] | None = None) -> None:
     args, hydra_overrides = parse_args(argv)
 
     # Resolve full repo_type from CLI alias
     repo_type = REPO_ALIASES[args.repo]
 
-    # ── Resolve config path relative to this script ─────────────────────────
+    # Resolve config path (hardcoded, relative to this script)
     script_dir = Path(__file__).resolve().parent
     config_dir = script_dir.parent / "configs"
     if not config_dir.exists():
@@ -344,7 +314,7 @@ def main(argv: list[str] | None = None) -> None:
     # Build Hydra overrides: repo selection + any CLI key=value pairs
     overrides = [f"repo={args.repo}"] + hydra_overrides
 
-    # ── Load and normalise config (Hydra resolves defaults + overrides) ─────
+    # Load and normalise config (Hydra resolves defaults + overrides)
     config = load_config(str(config_dir), args.config_name, overrides=overrides)
     if args.seed is not None:
         config["seed"] = args.seed
@@ -352,50 +322,48 @@ def main(argv: list[str] | None = None) -> None:
     logger.info(f"Loaded config '{args.config_name}' from {config_dir}")
     logger.info(f"  Repo: {repo_type}")
 
-    # ── Extract repo-specific kwargs from flattened config ──────────────────
+    # Extract repo-specific kwargs from flattened config
     repo_cls, kwargs_keys = REPO_REGISTRY[repo_type]
     repo_kwargs = _extract_repo_kwargs(config, kwargs_keys, repo_type)
     logger.info(f"  Repo kwargs: {repo_kwargs}")
 
-    # ── Output directory ────────────────────────────────────────────────────
+    # Output directory naming
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     run_dir = Path(args.output_dir) / f"{repo_type}_{timestamp}"
     run_dir.mkdir(parents=True, exist_ok=False)
     logger.info(f"Output directory: {run_dir}")
 
-    # ── RNG ─────────────────────────────────────────────────────────────────
     rng = jr.PRNGKey(config["seed"])
-    logger.info(f"JAX devices: {jax.devices()}")
+    logger.info(f"JAX devices: {jax.devices()}") # use CUDA_VISIBLE_DEVICES to control GPU selection before running in bash
 
-    # ── Environment creation ────────────────────────────────────────────────
+    # Environment creation
     env, env_params, static_env_params, train_env_reset_states, eval_env_reset_states, rng = setup_environments(config, rng)
     logger.info(
         f"Created {config['num_train_envs']} training environments "
         f"(mode: {config['train_level_mode']})"
     )
 
-    # ── Save env observation images ─────────────────────────────────────────
+    # Save env initial observation images
     save_env_observations(env_params, static_env_params, train_env_reset_states,
                           run_dir, folder="env_train_observations")
     save_env_observations(env_params, static_env_params, eval_env_reset_states,
                           run_dir, folder="eval_env_observations")
 
-    # ── Repo initialization ─────────────────────────────────────────────────
     from apa.repo import PolicyRepo
     logger.info(f"Initializing {repo_type} repo with kwargs: {repo_kwargs}")
     policy_repo: PolicyRepo = repo_cls(config, train_env_reset_states, rng, **repo_kwargs)
 
-    # ── Training loop ───────────────────────────────────────────────────────
+    # Training loop
     num_repo_updates = int(config["num_repo_updates"])
     logger.info(f"Starting training: {num_repo_updates} repo updates...")
     for _ in tqdm(range(num_repo_updates), desc="Repo updates"):
         policy_repo.advance()
     logger.info(f"Training complete. {len(policy_repo.step_logs)} steps logged.")
 
-    # ── Evaluation step ───────────────────────────────────────────────────
+    # Eval step
     logger.info("Starting evaluation...")
 
-    # Frozen evaluation (greedy assignment, no fine-tuning)
+    # Frozen evaluation (greedy assignment, no fine-tuning of policy on each environment)
     frozen_affinity, frozen_env2policy, frozen_metrics = \
         policy_repo.evaluate_frozen(eval_env_reset_states)
     _save_eval_csv(frozen_metrics, run_dir / "eval_frozen.csv")
@@ -407,7 +375,7 @@ def main(argv: list[str] | None = None) -> None:
 
     logger.info("Evaluation complete.")
 
-    # ── Save outputs ──────────────────────────────────────────────────────
+    # Save outputs
     with open(run_dir / "step_logs.pkl", "wb") as f:
         pickle.dump(policy_repo.step_logs, f)
 
@@ -425,17 +393,16 @@ def main(argv: list[str] | None = None) -> None:
 
     logger.info(f"Saved step_logs.pkl, config.json, repo_kwargs.json to {run_dir}")
 
-    # ── Generate plots ──────────────────────────────────────────────────────
+    # Generate plots (optionally skipped with --skip-plots)
     if not args.skip_plots:
         if len(policy_repo.step_logs) > 0:
             generate_plots(policy_repo.step_logs, run_dir)
         else:
             logger.warning("Warning: No step_logs collected — skipping plots.")
     else:
-        logger.info("Plots skipped (--skip-plots).")
+        logger.info("Plots skipped (due to --skip-plots flag being passed).")
 
     logger.info(f"Done. All outputs in {run_dir}")
-
 
 if __name__ == "__main__":
     main()

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Train the kinetix PPO experiment using a config from this repository.
+"""Train the kinetix PPO experiment using a config from this repository. 
+Used to produce a checkpoint for extractign policy latent representations in the PolicyLatentMatchingRepo.
 
 Composes config groups from ``third_party/kinetix/configs`` via
 ``hydra.searchpath``, with overrides defined in
@@ -31,8 +32,8 @@ from kinetix.util import generate_params_from_config, normalise_config, save_mod
 from omegaconf import OmegaConf
 from loguru import logger
 
-# ── Load make_train from kinetix's experiments/ppo.py ────────────────────────
-# experiments/ is *not* a subpackage of kinetix, so we use importlib instead.
+# Load make_train from kinetix's experiments/ppo.py
+# experiments/ is not a subpackage of kinetix, so we use importlib instead to import manually.
 _here = Path(__file__).resolve().parent
 _experiments_ppo = _here.parent / "third_party" / "kinetix" / "experiments" / "ppo.py"
 _spec = importlib.util.spec_from_file_location("kinetix_ppo", str(_experiments_ppo))
@@ -40,27 +41,15 @@ _ppo_mod = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_ppo_mod)  # type: ignore[union-attr]
 make_train = _ppo_mod.make_train
 
-
-# ──────────────────────────────────────────────────────────────────────────────
-# CLI
-# ──────────────────────────────────────────────────────────────────────────────
-
-
 def parse_args(argv: list[str] | None = None) -> list[str]:
     """Extract Hydra ``key=value`` overrides from CLI arguments."""
     parser = argparse.ArgumentParser(
-        description="Train the kinetix PPO experiment.",
+        description="Train the kinetix PPO experiment and save the checkpoint.",
         add_help=False,
     )
     parser.add_argument("overrides", nargs="*")
     args, _ = parser.parse_known_args(argv)
     return args.overrides
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Entry point
-# ──────────────────────────────────────────────────────────────────────────────
-
 
 def main() -> None:
     overrides = parse_args(sys.argv[1:])
@@ -70,7 +59,7 @@ def main() -> None:
     with initialize_config_dir(version_base=None, config_dir=str(config_dir)):
         cfg = compose(config_name="config", overrides=overrides)
 
-    # Convert to dict and normalise — flattens config groups (env, learning,
+    # Convert to dict and normalise - flattens config groups (env, learning,
     # model, misc, …), sets run_name, random_hash, num_updates, etc.
     cfg = OmegaConf.to_container(cfg, resolve=True)
     cfg = normalise_config(cfg, "PPO")
@@ -86,7 +75,7 @@ def main() -> None:
 
         init_wandb(cfg, "PPO")
 
-    # Compile the training function and run it
+    # JIT-compile the training function and run it
     rng = jax.random.PRNGKey(cfg["seed"])
     rng, _rng = jax.random.split(rng)
     train_fn = jax.jit(make_train(cfg, env_params, static_env_params))
