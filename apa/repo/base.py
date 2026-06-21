@@ -609,6 +609,54 @@ class PolicyRepo(ABC):
 
             return affinity, env2policy, metrics
 
+        def render_eval_videos(self, env2policy: jax.Array,
+                                eval_env_reset_states,
+                                video_dir: str) -> None:
+            """Render and save MP4 videos of evaluation rollouts.
+
+            Args:
+                env2policy: (E,) array mapping each eval env to its assigned policy.
+                eval_env_reset_states: pytree of evaluation env reset states.
+                video_dir: path to directory where ``env_000.mp4`` … will be saved.
+            """
+            import mediapy as media
+            from pathlib import Path
+
+            video_dir = Path(video_dir)
+            video_dir.mkdir(parents=True, exist_ok=True)
+
+            E = env2policy.shape[0]
+            policy_indices = env2policy
+            env_indices = jnp.arange(E)
+
+            params = jax.tree.map(lambda x: x[policy_indices],
+                                   self.policy_repo.train_state.params)
+            hstate = jax.tree.map(lambda x: x[policy_indices, 0],
+                                   self.policy_repo.hstate)
+            env_state = jax.tree.map(lambda x: x[env_indices],
+                                      eval_env_reset_states)
+            obs = jax.vmap(self.env.get_obs)(env_state.env_state)
+            resets = env_state
+
+            network_apply, env_step = self._make_eval_closures(E, render_pixels=True)
+
+            self.rng, rollout_rng = jax.random.split(self.rng)
+            pixel_frames = perform_rollout(
+                network_apply, env_step, params, hstate, env_state, obs,
+                resets, rollout_rng, self.eval_rollout_steps,
+            )  # (T, E, H, W, C)
+
+            pixel_frames = np.array(pixel_frames)  # GPU → CPU
+
+            for i in range(E):
+                frames_i = pixel_frames[:, i]  # (T, H, W, C)
+                out_path = video_dir / f"env_{i:03d}.mp4"
+                with media.VideoWriter(
+                    str(out_path), shape=frames_i.shape[1:3], fps=30, crf=18
+                ) as video:
+                    for t in range(frames_i.shape[0]):
+                        video.add_image(frames_i[t].transpose(1, 0, 2)[::-1])
+
         def update(self, policy_state: PolicyState,
                    candidate_env_indices: jax.Array,
                    affinity: jax.Array,

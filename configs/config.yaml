@@ -15,7 +15,7 @@ defaults:
     - model-transformer        # transformer_depth, transformer_size, num_heads
     - model-perm-invariant-mlp # symbolic_embedding_dim, encoder_size (compatibility)
   - train_levels: train_all    # list of training levels; set to "random" for procedural
-  - eval: null                    # held-out evaluation level set (set to null to use eval_ratio)
+  - eval: null            # evaluation level set (set to null to use eval_ratio)
   - learning:
     - ppo-base                 # lr, gamma, clip_eps, gae_lambda, ent_coef, etc.
     - ppo-rnn                  # num_steps, num_repeats (recurrent rollout config)
@@ -26,7 +26,7 @@ defaults:
 #  Repo-agnostic experiment settings
 # ══════════════════════════════════════════════════════════════════════════════
 
-seed: 0                       # JAX random seed for reproducibility
+seed: 1                       # JAX random seed for reproducibility
 
 # ── Environment batching ─────────────────────────────────────────────────────
 num_copies_per_env: 4         # parallel copies per distinct env;
@@ -50,7 +50,7 @@ evaluate_finetune_steps: 100    # PPO steps for per-env fine-tuning in evaluate_
 pretrain_eval_finetune_steps: 20  # PPO steps for per-step diagnostic fine-tuning
                               #   (separate from evaluate_finetune_steps). A lighter
                               #   budget suffices to reveal policy differentiation.
-diagnostic_finetune_frequency: 2  # Run diagnostic fine-tuning every N repo steps.
+diagnostic_finetune_frequency: 4  # Run diagnostic fine-tuning every N repo steps.
                               #   1 = every step; higher values reduce overhead.
 
 # ── Assignment ───────────────────────────────────────────────────────────────

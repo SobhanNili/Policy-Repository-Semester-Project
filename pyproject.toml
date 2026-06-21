@@ -16,6 +16,7 @@ dependencies = [
     "kinetix-env",
     "loguru>=0.7.3",
     "matplotlib>=3.10.9",
+    "mediapy>=1.2.6",
     "scikit-learn>=1.7.2",
     "seaborn>=0.13.2",
     "tqdm>=4.67.3",

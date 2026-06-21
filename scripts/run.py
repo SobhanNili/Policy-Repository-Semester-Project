@@ -117,6 +117,10 @@ def parse_args(argv: list[str] | None = None) -> tuple[argparse.Namespace, list[
         "--skip-plots", action="store_true",
         help="Skip generating diagnostic plots after training.",
     )
+    parser.add_argument(
+        "--skip-videos", action="store_true",
+        help="Skip saving evaluation rollout videos.",
+    )
 
     args, remaining = parser.parse_known_args(argv)
 
@@ -374,6 +378,19 @@ def main(argv: list[str] | None = None) -> None:
     _save_eval_csv(finetune_metrics, run_dir / "eval_finetune.csv")
 
     logger.info("Evaluation complete.")
+
+    # Save rollout videos (by default yes. skipped with --skip-videos)
+    if not args.skip_videos:
+        logger.info("Rendering evaluation rollout videos...")
+        policy_repo.render_eval_videos(
+            frozen_env2policy, eval_env_reset_states,
+            video_dir=str(run_dir / "videos" / "eval_frozen"),
+        )
+        policy_repo.render_eval_videos(
+            finetune_env2policy, eval_env_reset_states,
+            video_dir=str(run_dir / "videos" / "eval_finetune"),
+        )
+        logger.info("Videos saved.")
 
     # Save outputs
     with open(run_dir / "step_logs.pkl", "wb") as f:
