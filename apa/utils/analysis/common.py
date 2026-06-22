@@ -30,7 +30,7 @@ REPO_DISPLAY_NAMES: dict[str, str] = {
     "generalist_matching":      "Generalist",
 }
 
-_IDENTITY_COLS = {"run_dir", "repo_type", "repo_display"}
+_IDENTITY_COLS = {"run_dir", "repo_type", "repo_display", "seed"}
 _METRIC_PREFIXES = ("frozen_", "finetune_")
 
 def _get_color_for_repo(repo_type: str) -> str:

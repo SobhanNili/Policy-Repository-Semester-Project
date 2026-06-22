@@ -122,25 +122,128 @@ def _meta_group_keys(df: pd.DataFrame) -> list[str]:
     return keys
 
 
-def _select_best_per_repo(
+def _select_best_config_per_repo(
     df: pd.DataFrame,
     metric: str = "finetune_solve_rate_mean",
+    all_seeds: bool = False,
 ) -> pd.DataFrame:
     """Select the best hyperparameter configuration per repo type.
 
-    Picks the row with the highest *metric* value.  Falls back to
-    ``frozen_solve_rate_mean`` if *metric* is unavailable.
+    1. Groups runs by ``(repo_type, hyperparams)``, **excluding seed**, and
+       averages all metrics across seeds within each group.
+    2. Picks the group with the highest mean *metric* per repo type.
+    3. Finds the smallest seed common to **all** repo types (so evaluation
+       environments are comparable across repos).
+    4. Returns either:
+       - The single original DataFrame row for the common seed
+         (*all_seeds* = False, default; for checkerboards / ARI — one column
+         per repo).
+       - All original DataFrame rows for the winning config
+         (*all_seeds* = True; for bar plots — enables cross-seed error bars).
+
+    Falls back to ``frozen_solve_rate_mean`` if *metric* is unavailable.
+    When ``seed`` is absent from the DataFrame (older experiments without
+    seed logging), falls back to the old per-row best-pick behaviour.
     """
+    if df.empty:
+        return pd.DataFrame()
+
+    # ── Determine grouping columns (hyperparams only, not seed) ────────
+    # seed is excluded from varying cols because it's in _IDENTITY_COLS.
+    varying = _get_varying_hyperparam_cols(df)
+    group_cols = ["repo_type"] + [c for c in varying if c in df.columns]
+
+    has_seed = "seed" in df.columns
+
+    if not has_seed or len(group_cols) <= 1:
+        # No seed column or no hyperparams → fall back to old row-level pick.
+        best_rows: list[dict] = []
+        for repo_type, group in df.groupby("repo_type", dropna=False):
+            if metric in group.columns and group[metric].notna().any():
+                idx = group[metric].idxmax()
+            elif "frozen_solve_rate_mean" in group.columns:
+                idx = group["frozen_solve_rate_mean"].idxmax()
+            else:
+                idx = group.index[0]
+            best_rows.append(group.loc[idx].to_dict())
+        return pd.DataFrame(best_rows)
+
+    # ── Aggregate metrics across seeds within each config ──────────────
+    metric_patterns = ("frozen_", "finetune_")
+    metric_cols = [c for c in df.columns if c.startswith(metric_patterns)]
+
+    agg_dict: dict = {c: "mean" for c in metric_cols}
+    # Collect all seeds belonging to this config
+    agg_dict["seed"] = lambda x: sorted(x.dropna().unique().tolist())
+    agg_dict["run_dir"] = "first"  # placeholder for later lookup
+
+    grouped = df.groupby(group_cols, dropna=False).agg(agg_dict).reset_index()
+
+    # ── Find smallest seed common to ALL repo types ────────────────────
+    seeds_by_repo: dict[str, set] = {}
+    for rt in df["repo_type"].unique():
+        seeds_by_repo[rt] = set(
+            df.loc[df["repo_type"] == rt, "seed"].dropna().unique()
+        )
+    if seeds_by_repo:
+        common = set.intersection(*seeds_by_repo.values())
+        common_seed = min(common) if common else None
+    else:
+        common_seed = None
+
+    # ── Pick the best config per repo type ─────────────────────────────
     best_rows: list[dict] = []
-    for repo_type, group in df.groupby("repo_type", dropna=False):
+    for repo_type, group in grouped.groupby("repo_type", dropna=False):
         if metric in group.columns and group[metric].notna().any():
             idx = group[metric].idxmax()
         elif "frozen_solve_rate_mean" in group.columns:
             idx = group["frozen_solve_rate_mean"].idxmax()
         else:
             idx = group.index[0]
-        best_rows.append(group.loc[idx].to_dict())
-    return pd.DataFrame(best_rows)
+        best = group.loc[idx].to_dict()
+
+        # Choose representative seed for this config (used only when
+        # all_seeds=False — for checkerboards / ARI).
+        available = best.get("seed", [])
+        if common_seed is not None and common_seed in available:
+            chosen = common_seed
+        elif available:
+            chosen = available[0]  # smallest available as fallback
+        else:
+            chosen = None
+        best["_chosen_seed"] = chosen
+        best_rows.append(best)
+
+    best_df = pd.DataFrame(best_rows)
+
+    # ── Map back to original DataFrame rows ────────────────────────────
+    result_rows: list[dict] = []
+    for _, best in best_df.iterrows():
+        # Build mask for the winning config (repo_type + hyperparams)
+        mask = df["repo_type"] == best["repo_type"]
+        for col in group_cols:
+            if col == "repo_type" or col not in df.columns:
+                continue
+            val = best[col]
+            if pd.isna(val):
+                mask &= df[col].isna()
+            else:
+                mask &= df[col] == val
+
+        if all_seeds:
+            # Bar plots: return all seeds so error bars show cross-seed std.
+            for _, row in df[mask].iterrows():
+                result_rows.append(row.to_dict())
+        else:
+            # Checkerboard / ARI: only the common-seed row (one column per repo).
+            chosen_seed = best.get("_chosen_seed")
+            if chosen_seed is not None and has_seed:
+                mask &= df["seed"] == chosen_seed
+            match = df[mask]
+            if not match.empty:
+                result_rows.append(match.iloc[0].to_dict())
+
+    return pd.DataFrame(result_rows)
 
 
 def _collect_eval_assignments(df: pd.DataFrame) -> dict | None:
@@ -515,11 +618,23 @@ def plot_per_repo_checkerboards(df: pd.DataFrame, plots_dir: Path) -> None:
         )
 
 
-def plot_adjusted_rand_score_heatmap(df: pd.DataFrame, plots_dir: Path) -> None:
+def plot_adjusted_rand_score_heatmap(
+    df: pd.DataFrame,
+    plots_dir: Path,
+    metric: str = "finetune_solve_rate_mean",
+    filename: str = "adjusted_rand_heatmap.png",
+) -> None:
     """Heatmap of pairwise Adjusted Rand Index between eval assignments
-    of the best configuration per repo type."""
+    of the best configuration per repo type.
 
-    best_df = _select_best_per_repo(df)
+    Args:
+        df: DataFrame from ``collect_experiment_results``.
+        plots_dir: directory to save the plot to.
+        metric: which metric to use for selecting the best config
+            (e.g. ``"frozen_solve_rate_mean"`` or ``"finetune_solve_rate_mean"``).
+        filename: output filename.
+    """
+    best_df = _select_best_config_per_repo(df, metric=metric)
     data = _collect_eval_assignments(best_df)
     if data is None or data["assignment_matrix"].shape[1] < 2:
         return
@@ -534,6 +649,8 @@ def plot_adjusted_rand_score_heatmap(df: pd.DataFrame, plots_dir: Path) -> None:
             ari[i, j] = adjusted_rand_score(assignment[:, i], assignment[:, j])
             ari[j, i] = ari[i, j]
 
+    criteria_label = "Frozen" if "frozen" in metric else "Finetune"
+
     with sns.plotting_context("notebook"), sns.axes_style("white"):
         fig, ax = plt.subplots(figsize=(max(6, N * 1.0), max(5, N * 0.85)))
         sns.heatmap(ari, annot=False, fmt=".3f", cmap="RdYlBu_r",
@@ -542,11 +659,12 @@ def plot_adjusted_rand_score_heatmap(df: pd.DataFrame, plots_dir: Path) -> None:
                     linewidths=0.5, linecolor="white",
                     cbar_kws={"label": "Adjusted Rand Index", "shrink": 0.8},
                     ax=ax)
-        ax.set_title("Eval Assignment Similarity — Adjusted Rand Index")
+        ax.set_title(
+            f"Eval Assignment Similarity — Adjusted Rand Index ({criteria_label})"
+        )
 
     plots_dir.mkdir(parents=True, exist_ok=True)
-    fig.savefig(plots_dir / "adjusted_rand_heatmap.png", dpi=150,
-                bbox_inches="tight")
+    fig.savefig(plots_dir / filename, dpi=150, bbox_inches="tight")
     plt.close(fig)
 
 # Public orchestrator API
@@ -558,43 +676,89 @@ def generate_comparison_plots(
     """Generate all cross-experiment comparison plots and a summary CSV.
 
     Produces:
-        - ``comparison_{repo_type}.png`` — per repo type, comparing its configs.
-        - ``comparison_best.png`` — best config per repo type, side by side.
+        - ``comparison_{repo_type}.png`` — per repo type, comparing its configs
+          (averaged across seeds).
+        - ``comparison_best_frozen.png`` — best config per repo type by frozen perf.
+        - ``comparison_best_finetune.png`` — best config per repo type by finetune perf.
         - ``frozen_vs_finetune_scatter.png`` — all runs scatter.
         - ``per_env_distributions.png`` — violin plot (all runs).
         - ``eval_checkerboard_{repo_type}.png`` — assignment heatmaps.
-        - ``eval_checkerboard_best.png`` — best-config assignment heatmap.
-        - ``adjusted_rand_heatmap.png`` — ARI similarity between repos.
+        - ``eval_checkerboard_best_frozen.png`` / ``_finetune.png`` — best-config
+          assignment heatmaps for each criterion.
+        - ``adjusted_rand_heatmap_frozen.png`` / ``_finetune.png`` — ARI similarity
+          between best configs for each criterion.
         - ``comparison_summary.csv`` — all metrics in one table.
     """
     plots_dir.mkdir(parents=True, exist_ok=True)
 
+    # Per-repo hyperparam comparison (auto-averages across seeds)
     plot_per_repo_comparison_bars(df, plots_dir)
-
-    best_df = _select_best_per_repo(df)
-    if not best_df.empty:
-        plot_comparison_bars(best_df, plots_dir,
-                             title="Best Configuration Per Repo Type",
-                             filename="comparison_best.png")
 
     has_ft = ("finetune_solve_rate_mean" in df.columns
               and df["finetune_solve_rate_mean"].notna().any())
+
+    # ── Best by frozen criterion ───────────────────────────────────────
+    # Bar plots use all_seeds=True → cross-seed error bars are shown.
+    # Checkerboard & ARI use default all_seeds=False → one column per repo.
+    best_frozen_bars = _select_best_config_per_repo(
+        df, metric="frozen_solve_rate_mean", all_seeds=True
+    )
+    if not best_frozen_bars.empty:
+        plot_comparison_bars(
+            best_frozen_bars, plots_dir,
+            title="Best Configuration Per Repo Type (Frozen Criterion)",
+            filename="comparison_best_frozen.png",
+        )
+    best_frozen_single = _select_best_config_per_repo(
+        df, metric="frozen_solve_rate_mean"
+    )
+    if not best_frozen_single.empty:
+        plot_eval_assignment_checkerboard(
+            best_frozen_single, plots_dir,
+            title="Best Config Per Repo Type (Frozen) — Eval Assignment",
+            filename="eval_checkerboard_best_frozen.png",
+        )
+        plot_adjusted_rand_score_heatmap(
+            df, plots_dir, metric="frozen_solve_rate_mean",
+            filename="adjusted_rand_heatmap_frozen.png",
+        )
+
+    # ── Best by finetune criterion ─────────────────────────────────────
+    if has_ft:
+        best_finetune_bars = _select_best_config_per_repo(
+            df, metric="finetune_solve_rate_mean", all_seeds=True
+        )
+        if not best_finetune_bars.empty:
+            plot_comparison_bars(
+                best_finetune_bars, plots_dir,
+                title="Best Configuration Per Repo Type (Finetune Criterion)",
+                filename="comparison_best_finetune.png",
+            )
+        best_finetune_single = _select_best_config_per_repo(
+            df, metric="finetune_solve_rate_mean"
+        )
+        if not best_finetune_single.empty:
+            plot_eval_assignment_checkerboard(
+                best_finetune_single, plots_dir,
+                title="Best Config Per Repo Type (Finetune) — Eval Assignment",
+                filename="eval_checkerboard_best_finetune.png",
+            )
+            plot_adjusted_rand_score_heatmap(
+                df, plots_dir, metric="finetune_solve_rate_mean",
+                filename="adjusted_rand_heatmap_finetune.png",
+            )
+
+    # ── All-runs scatter (every seed shown as one point) ───────────────
     if has_ft:
         plot_frozen_vs_finetune_scatter(df, plots_dir, metric="solve_rate")
         plot_frozen_vs_finetune_scatter(df, plots_dir, metric="avg_return")
 
+    # ── Per-environment distributions ─────────────────────────────────
     if outputs_root is not None:
         plot_per_env_distributions(df, plots_dir)
 
+    # ── Per-repo checkerboards (all configs, all seeds shown) ─────────
     plot_per_repo_checkerboards(df, plots_dir)
-
-    if not best_df.empty:
-        plot_eval_assignment_checkerboard(
-            best_df, plots_dir,
-            title="Best Configuration Per Repo Type — Eval Assignment",
-            filename="eval_checkerboard_best.png",
-        )
-        plot_adjusted_rand_score_heatmap(df, plots_dir)
 
     # Summary CSV
     metric_cols = [
