@@ -14,7 +14,7 @@ defaults:
     - model-base               # fc_layer_depth, fc_layer_width, activation
     - model-transformer        # transformer_depth, transformer_size, num_heads
     - model-perm-invariant-mlp # symbolic_embedding_dim, encoder_size (compatibility)
-  - train_levels: train_all    # list of training levels; set to "random" for procedural
+  - train_levels: grouped    # list of training levels; set to "random" for procedural
   - eval: null            # evaluation level set (set to null to use eval_ratio)
   - learning:
     - ppo-base                 # lr, gamma, clip_eps, gae_lambda, ent_coef, etc.
@@ -26,15 +26,15 @@ defaults:
 #  Repo-agnostic experiment settings
 # ══════════════════════════════════════════════════════════════════════════════
 
-seed: 1                       # JAX random seed for reproducibility
+seed: 0                       # JAX random seed for reproducibility
 
 # ── Environment batching ─────────────────────────────────────────────────────
 num_copies_per_env: 4         # parallel copies per distinct env;
                               #   total batch per policy = candidate_pool_size × num_copies_per_env
 
 # ── Training budget ──────────────────────────────────────────────────────────
-num_updates: 150              # PPO update steps per repository iteration (inner loop)
-num_repo_updates: 50          # number of repository steps (outer loop over advance())
+num_updates: 100              # PPO update steps per repository iteration (inner loop)
+num_repo_updates: 40          # number of repository steps (outer loop over advance())
 
 # ── Repository structure ─────────────────────────────────────────────────────
 num_policies: 4               # fixed number of policy networks in the repository
@@ -45,12 +45,12 @@ candidate_pool_size: 6        # distinct envs randomly sampled per repo step;
 eval_ratio: 0.2               # train/eval split ratio (used when eval config is null)
 eval_rollout_steps: 512       # rollout steps for frozen-policy evaluation;
                               #   environments auto-reset after 256 steps (Kinetix truncation)
-evaluate_finetune_steps: 100    # PPO steps for per-env fine-tuning in evaluate_finetune;
+evaluate_finetune_steps: 50    # PPO steps for per-env fine-tuning in evaluate_finetune;
                               #   fine-tuned params are discarded after evaluation
 pretrain_eval_finetune_steps: 20  # PPO steps for per-step diagnostic fine-tuning
                               #   (separate from evaluate_finetune_steps). A lighter
                               #   budget suffices to reveal policy differentiation.
-diagnostic_finetune_frequency: 4  # Run diagnostic fine-tuning every N repo steps.
+diagnostic_finetune_frequency: 5  # Run diagnostic fine-tuning every N repo steps.
                               #   1 = every step; higher values reduce overhead.
 
 # ── Assignment ───────────────────────────────────────────────────────────────

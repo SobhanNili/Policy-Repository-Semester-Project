@@ -15,33 +15,35 @@ BASE = [
     "--existing-pvc", "claimname=home,path=/home/niliahma",
 ]
 
+SEED = 0
+
 # ── Define every experiment as (job_name, python_command) ──────────────────
 EXPERIMENTS = [
     # Dino sweeps
-    ("dino-sigma-0-3",  "python scripts/run.py --repo dino --sigma 0.3"),
-    ("dino-sigma-0-5",  "python scripts/run.py --repo dino --sigma 0.5"),
-    ("dino-sigma-0-7",  "python scripts/run.py --repo dino --sigma 0.7"),
+    ("dino-sigma-0-3",  f"python scripts/run.py --repo dino --sigma 0.3 --seed {SEED}"),
+    ("dino-sigma-0-5",  f"python scripts/run.py --repo dino --sigma 0.5 --seed {SEED}"),
+    ("dino-sigma-0-7",  f"python scripts/run.py --repo dino --sigma 0.7 --seed {SEED}"),
 
     # Morphology sweeps
-    ("morph-sigma-0-15", "python scripts/run.py --repo morphology --sigma 0.15"),
-    ("morph-sigma-0-3",  "python scripts/run.py --repo morphology --sigma 0.3"),
-    ("morph-sigma-0-5",  "python scripts/run.py --repo morphology --sigma 0.5"),
+    ("morph-sigma-0-15", f"python scripts/run.py --repo morphology --sigma 0.15 --seed {SEED}"),
+    ("morph-sigma-0-3",  f"python scripts/run.py --repo morphology --sigma 0.3 --seed {SEED}"),
+    ("morph-sigma-0-5",  f"python scripts/run.py --repo morphology --sigma 0.5 --seed {SEED}"),
 
     # Policy latent sweeps
-    ("policy-sigma-0-3", "python scripts/run.py --repo policy_latent --sigma 0.3"),
-    ("policy-sigma-0-5", "python scripts/run.py --repo policy_latent --sigma 0.5"),
-    ("policy-sigma-0-7", "python scripts/run.py --repo policy_latent --sigma 0.7"),
+    ("policy-sigma-0-3", f"python scripts/run.py --repo policy_latent --sigma 0.3 --seed {SEED}"),
+    ("policy-sigma-0-5", f"python scripts/run.py --repo policy_latent --sigma 0.5 --seed {SEED}"),
+    ("policy-sigma-0-7", f"python scripts/run.py --repo policy_latent --sigma 0.7 --seed {SEED}"),
 
     # Performance sweeps
-    ("perf-rank",      "python scripts/run.py --repo performance --mode return_rank"),
-    ("perf-solve-rate", "python scripts/run.py --repo performance --mode solve_rate"),
-    ("perf-hybrid",    "python scripts/run.py --repo performance --mode hybrid"),
+    ("perf-return-rank",      f"python scripts/run.py --repo performance --mode return_rank --seed {SEED}"),
+    ("perf-solve-rate", f"python scripts/run.py --repo performance --mode solve_rate --seed {SEED}"),
+    ("perf-hybrid",    f"python scripts/run.py --repo performance --mode hybrid --seed {SEED}"),
 
     # Random
-    ("random", "python scripts/run.py --repo random"),
+    ("random", f"python scripts/run.py --repo random --seed {SEED}"),
 
     # Generalist
-    ("generalist", "python scripts/run.py --repo generalist"),
+    ("generalist", f"python scripts/run.py --repo generalist --seed {SEED}"),
 ]
 
 
