@@ -230,14 +230,14 @@ def _plot_performance(data: _StepLogData, plots_dir: Path, colors):
     ax2.legend(ncol=P, loc="lower right")
 
     fig.tight_layout()
-    fig.savefig(plots_dir / "performance_over_training.png", dpi=150,
+    fig.savefig(plots_dir / "performance_over_training.svg",
                 bbox_inches="tight")
     plt.close(fig)
 
 
 def _plot_active_envs(data: _StepLogData, plots_dir: Path, colors):
     """Stackplot of active environment counts per policy (post-mask)."""
-    with _figure_saver(plots_dir, "assigned_envs.png", figsize=(10, 4)) as (fig, ax):
+    with _figure_saver(plots_dir, "assigned_envs.svg", figsize=(10, 4)) as (fig, ax):
         ax.stackplot(np.arange(data.T), data.n_active_envs.T,
                      labels=[f"Policy {p}" for p in range(data.P)],
                      colors=colors, alpha=0.85)
@@ -256,7 +256,7 @@ def _plot_env_greedy_policy_choice(data: _StepLogData, plots_dir: Path, colors):
     net is doing heavy lifting.
     """
     steps = np.arange(1, data.T)
-    with _figure_saver(plots_dir, "env_greedy_policy_choices.png",
+    with _figure_saver(plots_dir, "env_greedy_policy_choices.svg",
                        figsize=(10, 4)) as (fig, ax):
         ax.stackplot(steps, data.n_greedy_envs[1:].T,
                      labels=[f"Policy {p}" for p in range(data.P)],
@@ -273,7 +273,7 @@ def _plot_env_greedy_policy_choice(data: _StepLogData, plots_dir: Path, colors):
 def _plot_affinity_score_spread_cv(data: _StepLogData, plots_dir: Path):
     """Box plot of per-environment CV (σ/μ) at each repo step."""
     _plot_boxplot_over_time(
-        data.cv_per_env, plots_dir, "score_spread_cv.png",
+        data.cv_per_env, plots_dir, "score_spread_cv.svg",
         title="Affinity Score Spread — Coefficient of Variation Over Training",
         ylabel=r"CV ($\sigma$ / $\mu$) per Environment",
         ylim=(data.cv_per_env.min() - 0.1, data.cv_per_env.max() + 0.1),
@@ -288,7 +288,7 @@ def _plot_affinity_score_spread_margin(data: _StepLogData, plots_dir: Path):
     1 = one policy clearly dominates (confident assignment).
     """
     _plot_boxplot_over_time(
-        data.score_margin_per_env, plots_dir, "score_spread_margin.png",
+        data.score_margin_per_env, plots_dir, "score_spread_margin.svg",
         title="Affinity Score Spread — Normalized Top-2 Margin",
         ylabel="Normalized Margin per Environment",
         ylim=(-0.05, 1.05),
@@ -331,7 +331,7 @@ def _plot_assignment_heatmap(data: _StepLogData, plots_dir: Path, colors):
     ax.invert_yaxis()
 
     fig.tight_layout()
-    fig.savefig(plots_dir / "assignment_heatmap.png", dpi=150, bbox_inches="tight")
+    fig.savefig(plots_dir / "assignment_heatmap.svg", bbox_inches="tight")
     plt.close(fig)
 
 
@@ -538,8 +538,8 @@ def plot_eval_assignment_bars(
 
     fig.tight_layout()
     plots_dir.mkdir(parents=True, exist_ok=True)
-    fig.savefig(plots_dir / "eval_env_assignment_dist.png",
-                dpi=150, bbox_inches="tight", facecolor="white")
+    fig.savefig(plots_dir / "eval_env_assignment_dist.svg",
+                bbox_inches="tight", facecolor="white")
     plt.close(fig)
 
 
@@ -675,12 +675,12 @@ def generate_plots(step_logs: list, output_dir: Path) -> None:
     _plot_per_env_spearman(
         data, plots_dir, rho_key="spearman_pre_frozen",
         title="Affinity–Solve Rate Spearman ρ (Frozen, Pre-Training)",
-        filename="affinity_sr_spearman_frozen.png",
+        filename="affinity_sr_spearman_frozen.svg",
     )
     _plot_per_env_spearman(
         data, plots_dir, rho_key="spearman_pre_finetune",
         title="Affinity–Solve Rate Spearman ρ (Finetuned, Pre-Training)",
-        filename="affinity_sr_spearman_finetune.png",
+        filename="affinity_sr_spearman_finetune.svg",
     )
 
     # Per-step assignment grids

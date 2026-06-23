@@ -19,6 +19,7 @@ REPO_COLORS: dict[str, str] = {
     "dino_matching":            "#56B4E9",
     "policy_latent_matching":   "#009E73",
     "performance_matching":     "#CC79A7",
+    "generalist_matching":      "#882255",
 }
 
 REPO_DISPLAY_NAMES: dict[str, str] = {
@@ -134,8 +135,11 @@ def _desaturate(hex_color: str, amount: float = 0.4) -> str:
     return f"#{r:02x}{g:02x}{b:02x}"
 
 @contextmanager
-def _figure_saver(plots_dir: Path, filename: str, figsize=(10, 5), dpi=150):
+def _figure_saver(plots_dir: Path, filename: str, figsize=(10, 5), dpi=150,
+                  format: str | None = None):
     """Context manager that creates a figure, then saves and closes it.
+
+    If *format* is provided, the file extension is replaced (e.g. ``"svg"``).
 
     Usage::
 
@@ -143,6 +147,8 @@ def _figure_saver(plots_dir: Path, filename: str, figsize=(10, 5), dpi=150):
             ax.plot(...)
             ax.set_xlabel("Step")
     """
+    if format is not None:
+        filename = str(Path(filename).with_suffix(f".{format}"))
     fig, ax = plt.subplots(figsize=figsize)
     try:
         yield fig, ax

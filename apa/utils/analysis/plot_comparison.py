@@ -317,31 +317,47 @@ def plot_comparison_bars(
     df: pd.DataFrame,
     plots_dir: Path,
     title: str | None = None,
-    filename: str = "comparison_bars.png",
+    filename: str = "comparison_bars.svg",
+    finetune_only: bool = False,
+    reference_repos: dict[str, str] | None = None,
 ) -> None:
     """Grouped bar chart: frozen vs finetuned mean ± std per (repo_type, config).
 
     If multiple runs share the same config (different seeds), they are
     averaged and std is computed across seeds.
+
+    Args:
+        finetune_only: if True, only finetuned bars are shown (no frozen).
+        reference_repos: optional ``{repo_type: legend_label}`` mapping for
+            horizontal reference lines (e.g. baseline / control markers).
     """
     group_keys = _meta_group_keys(df)
     varying_cols = _get_varying_hyperparam_cols(df)
 
     def _build_agg(metric: str) -> pd.DataFrame:
-        agg = df.groupby(group_keys, dropna=False).agg(
-            frozen_mean=(f"frozen_{metric}_mean", "mean"),
-            frozen_std=(f"frozen_{metric}_mean", "std"),
-            finetune_mean=(f"finetune_{metric}_mean", "mean"),
-            finetune_std=(f"finetune_{metric}_mean", "std"),
-            n=(f"frozen_{metric}_mean", "count"),
-        ).reset_index()
-        agg["frozen_std"] = agg["frozen_std"].fillna(0)
-        agg["finetune_std"] = agg["finetune_std"].fillna(0)
+        if finetune_only:
+            agg = df.groupby(group_keys, dropna=False).agg(
+                finetune_mean=(f"finetune_{metric}_mean", "mean"),
+                finetune_std=(f"finetune_{metric}_mean", "std"),
+                n=(f"finetune_{metric}_mean", "count"),
+            ).reset_index()
+            agg["finetune_std"] = agg["finetune_std"].fillna(0)
+        else:
+            agg = df.groupby(group_keys, dropna=False).agg(
+                frozen_mean=(f"frozen_{metric}_mean", "mean"),
+                frozen_std=(f"frozen_{metric}_mean", "std"),
+                finetune_mean=(f"finetune_{metric}_mean", "mean"),
+                finetune_std=(f"finetune_{metric}_mean", "std"),
+                n=(f"frozen_{metric}_mean", "count"),
+            ).reset_index()
+            agg["frozen_std"] = agg["frozen_std"].fillna(0)
+            agg["finetune_std"] = agg["finetune_std"].fillna(0)
         return agg
 
     agg_sr = _build_agg("solve_rate")
     agg_ar = _build_agg("avg_return")
-    order = agg_sr.sort_values("frozen_mean", ascending=False).index
+    sort_col = "finetune_mean" if finetune_only else "frozen_mean"
+    order = agg_sr.sort_values(sort_col, ascending=False).index
     agg_sr = agg_sr.loc[order].reset_index(drop=True)
     agg_ar = agg_ar.loc[order].reset_index(drop=True)
 
@@ -360,49 +376,122 @@ def plot_comparison_bars(
         labels.append(label)
 
     x = np.arange(N)
-    width = 0.35
     colors = [_get_color_for_repo(t) for t in agg_sr["repo_type"]]
 
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(max(8, N * 0.9), 8),
                                    sharex=True)
 
-    def _draw_bars(ax, agg, metric_label: str):
-        ax.bar(x - width / 2, agg["frozen_mean"], width,
-               yerr=agg["frozen_std"], capsize=4,
-               color=colors, edgecolor="white", linewidth=0.8)
-        ax.bar(x + width / 2, agg["finetune_mean"], width,
-               yerr=agg["finetune_std"], capsize=4,
-               color=[_desaturate(c, 0.5) for c in colors],
-               edgecolor="white", linewidth=0.8, hatch="//")
-        for i, (m, s, n) in enumerate(zip(agg["frozen_mean"],
-                                           agg["frozen_std"], agg["n"])):
-            if n > 1:
-                ax.annotate(f"n={n}", (i - width / 2, m + s + 0.015),
-                            ha="center", fontsize=7, color="gray")
-        ax.set_ylabel(metric_label)
-        all_means = np.concatenate([agg["frozen_mean"].values,
-                                     agg["finetune_mean"].values])
-        all_stds = np.concatenate([agg["frozen_std"].values,
-                                    agg["finetune_std"].values])
-        ax.set_ylim(0, max(1.05, (all_means + all_stds).max() + 0.05))
+    if finetune_only:
+        # ── Finetune-only mode: single bar per group ──────────────────
+        bar_width = 0.5
 
-    _draw_bars(ax1, agg_sr, "Solve Rate")
-    _draw_bars(ax2, agg_ar, "Avg Return")
+        def _draw_bars(ax, agg, metric_label: str):
+            ax.bar(x, agg["finetune_mean"], bar_width,
+                   yerr=agg["finetune_std"], capsize=4,
+                   color=[_desaturate(c, 0.5) for c in colors],
+                   edgecolor="white", linewidth=0.8, hatch="//")
+            for i, (m, s, n) in enumerate(zip(agg["finetune_mean"],
+                                               agg["finetune_std"], agg["n"])):
+                if n > 1:
+                    ax.annotate(f"n={n}", (i, m + s + 0.015),
+                                ha="center", fontsize=7, color="gray")
+            ax.set_ylabel(metric_label)
+            all_means = agg["finetune_mean"].values
+            all_stds = agg["finetune_std"].values
+            ax.set_ylim(
+                min(0, (all_means - all_stds).min() - 0.05),
+                max(1.05, (all_means + all_stds).max() + 0.05),
+            )
+            return _draw_reference_lines(ax, agg, "finetune_mean")
 
-    legend_handles = [
-        mpatches.Patch(facecolor="#888888", edgecolor="white",
-                       linewidth=0.8, label="Frozen"),
-        mpatches.Patch(facecolor="#cccccc", edgecolor="white",
-                       linewidth=0.8, hatch="//", label="Finetuned"),
-    ]
-    fig.legend(handles=legend_handles, loc="lower center", ncol=2,
-               fontsize=9, frameon=False, handlelength=1.4, handleheight=1.2)
+    else:
+        # ── Normal mode: frozen + finetuned side by side ─────────────
+        width = 0.35
+
+        def _draw_bars(ax, agg, metric_label: str):
+            ax.bar(x - width / 2, agg["frozen_mean"], width,
+                   yerr=agg["frozen_std"], capsize=4,
+                   color=colors, edgecolor="white", linewidth=0.8)
+            ax.bar(x + width / 2, agg["finetune_mean"], width,
+                   yerr=agg["finetune_std"], capsize=4,
+                   color=[_desaturate(c, 0.5) for c in colors],
+                   edgecolor="white", linewidth=0.8, hatch="//")
+            for i, (m, s, n) in enumerate(zip(agg["frozen_mean"],
+                                               agg["frozen_std"], agg["n"])):
+                if n > 1:
+                    ax.annotate(f"n={n}", (i - width / 2, m + s + 0.015),
+                                ha="center", fontsize=7, color="gray")
+            ax.set_ylabel(metric_label)
+            all_means = np.concatenate([agg["frozen_mean"].values,
+                                         agg["finetune_mean"].values])
+            all_stds = np.concatenate([agg["frozen_std"].values,
+                                        agg["finetune_std"].values])
+            ax.set_ylim(
+                min(0, (all_means - all_stds).min() - 0.05),
+                max(1.05, (all_means + all_stds).max() + 0.05),
+            )
+            return _draw_reference_lines(ax, agg, "finetune_mean")
+
+    def _draw_reference_lines(ax, agg, value_col: str) -> list:
+        """Draw horizontal reference lines; return legend handles."""
+        if not reference_repos:
+            return []
+        handles = []
+        for rt, ref_label in reference_repos.items():
+            mask = agg["repo_type"] == rt
+            if not mask.any():
+                continue
+            val = agg.loc[mask, value_col].values[0]
+            if pd.isna(val):
+                continue
+            color = _get_color_for_repo(rt)
+            ax.axhline(val, color=color, linestyle="--", linewidth=1.2,
+                       alpha=0.85, zorder=5)
+            handles.append(
+                mpatches.Patch(facecolor=color, edgecolor="white",
+                               linewidth=0.5, label=ref_label)
+            )
+        return handles
+
+    ref_sr = _draw_bars(ax1, agg_sr, "Solve Rate")
+    ref_ar = _draw_bars(ax2, agg_ar, "Avg Return")
+
+    # Collect unique reference legend handles (deduplicate across axes).
+    all_ref = ref_sr + ref_ar
+    unique_ref: list = []
+    if all_ref:
+        seen: set[str] = set()
+        for h in all_ref:
+            lbl = h.get_label()
+            if lbl not in seen:
+                seen.add(lbl)
+                unique_ref.append(h)
+
+    # ── Single figure legend (frozen/finetuned + reference lines) ─────
+    fig_handles: list = []
+    if not finetune_only:
+        fig_handles.extend([
+            mpatches.Patch(facecolor="#888888", edgecolor="white",
+                           linewidth=0.8, label="Frozen"),
+            mpatches.Patch(facecolor="#cccccc", edgecolor="white",
+                           linewidth=0.8, hatch="//", label="Finetuned"),
+        ])
+    if unique_ref:
+        fig_handles.extend(unique_ref)
+
+    if fig_handles:
+        fig.legend(handles=fig_handles, loc="lower center",
+                   ncol=len(fig_handles), fontsize=8.5,
+                   frameon=True, edgecolor="#e0e0e0",
+                   facecolor="white", framealpha=0.9,
+                   handlelength=1.2, handletextpad=0.5,
+                   columnspacing=1.2)
 
     ax2.set_xticks(x)
     ax2.set_xticklabels(labels, rotation=25, ha="right", fontsize=9)
     fig.suptitle(title or "Policy Repo Comparison", fontsize=13, fontweight="bold")
 
-    fig.tight_layout()
+    fig.tight_layout(rect=[0, 0.07, 1, 0.97])
     fig.savefig(plots_dir / filename, dpi=150, bbox_inches="tight")
     plt.close(fig)
 
@@ -416,7 +505,7 @@ def plot_per_repo_comparison_bars(df: pd.DataFrame, plots_dir: Path) -> None:
         plot_comparison_bars(
             sub_df, plots_dir,
             title=f"{_get_display_name(repo_type)} — Hyperparameter Comparison",
-            filename=f"comparison_{repo_type}.png",
+            filename=f"comparison_{repo_type}.svg",
         )
 
 # Frozen vs Finetuned scatter
@@ -436,7 +525,7 @@ def plot_frozen_vs_finetune_scatter(
     if df_plot.empty:
         return
 
-    with _figure_saver(plots_dir, f"frozen_vs_finetune_{metric}_scatter.png",
+    with _figure_saver(plots_dir, f"frozen_vs_finetune_{metric}_scatter.svg",
                        figsize=(7, 7)) as (fig, ax):
         for rt in sorted(df_plot["repo_type"].unique()):
             sub = df_plot[df_plot["repo_type"] == rt]
@@ -493,7 +582,7 @@ def plot_per_env_distributions(df: pd.DataFrame, plots_dir: Path) -> None:
         for label in order
     }
 
-    with _figure_saver(plots_dir, "per_env_distributions.png",
+    with _figure_saver(plots_dir, "per_env_distributions.svg",
                        figsize=(max(8, len(order) * 0.7), 5)) as (fig, ax):
         sns.violinplot(data=plot_df, x="run_label", y="solve_rate",
                        hue="run_label", order=order, palette=palette,
@@ -510,7 +599,7 @@ def plot_eval_assignment_checkerboard(
     df: pd.DataFrame,
     plots_dir: Path,
     title: str | None = None,
-    filename: str = "eval_assignment_checkerboard.png",
+    filename: str = "eval_assignment_checkerboard.svg",
 ) -> None:
     """Checkerboard heatmap: which policy each eval env was assigned to.
 
@@ -614,7 +703,7 @@ def plot_per_repo_checkerboards(df: pd.DataFrame, plots_dir: Path) -> None:
         plot_eval_assignment_checkerboard(
             sub_df, plots_dir,
             title=f"{_get_display_name(repo_type)} — Eval Assignment per Configuration",
-            filename=f"eval_checkerboard_{repo_type}.png",
+            filename=f"eval_checkerboard_{repo_type}.svg",
         )
 
 
@@ -622,7 +711,7 @@ def plot_adjusted_rand_score_heatmap(
     df: pd.DataFrame,
     plots_dir: Path,
     metric: str = "finetune_solve_rate_mean",
-    filename: str = "adjusted_rand_heatmap.png",
+    filename: str = "adjusted_rand_heatmap.svg",
 ) -> None:
     """Heatmap of pairwise Adjusted Rand Index between eval assignments
     of the best configuration per repo type.
@@ -635,6 +724,11 @@ def plot_adjusted_rand_score_heatmap(
         filename: output filename.
     """
     best_df = _select_best_config_per_repo(df, metric=metric)
+    # Exclude random and generalist — their assignments carry no meaningful
+    # signal for similarity analysis.
+    best_df = best_df[~best_df["repo_type"].isin(
+        ["random_matching", "generalist_matching"]
+    )]
     data = _collect_eval_assignments(best_df)
     if data is None or data["assignment_matrix"].shape[1] < 2:
         return
@@ -660,12 +754,124 @@ def plot_adjusted_rand_score_heatmap(
                     cbar_kws={"label": "Adjusted Rand Index", "shrink": 0.8},
                     ax=ax)
         ax.set_title(
-            f"Eval Assignment Similarity — Adjusted Rand Index ({criteria_label})"
+            f"Similarity in Environment Grouping - Adjusted Rand Index"
         )
 
     plots_dir.mkdir(parents=True, exist_ok=True)
     fig.savefig(plots_dir / filename, dpi=150, bbox_inches="tight")
     plt.close(fig)
+
+def plot_active_policies_bar(
+    df: pd.DataFrame,
+    plots_dir: Path,
+    metric: str = "finetune_solve_rate_mean",
+    filename: str = "active_policies.svg",
+) -> None:
+    """Bar chart: number of active (assigned) policies during evaluation
+    for the best configuration per repo type.
+
+    An "active" policy is one that gets at least one evaluation environment
+    assigned via greedy argmax affinity matching.  This reveals whether
+    a repo's affinity scoring leads to policy collapse (few policies
+    dominate) or balanced specialization.
+
+    The ``random_matching`` repo is excluded because its assignments are
+    inherently random and carry no meaningful signal.
+
+    Args:
+        df: DataFrame from ``collect_experiment_results``.
+        plots_dir: directory to save the plot to.
+        metric: which metric to use for selecting the best config
+            (default ``"finetune_solve_rate_mean"``).
+        filename: output filename.
+    """
+    best_df = _select_best_config_per_repo(df, metric=metric)
+    # Exclude random_matching — random assignments are meaningless here.
+    best_df = best_df[best_df["repo_type"] != "random_matching"]
+    if best_df.empty:
+        print("Warning: no (non-random) best-config data — skipping active-policies plot.")
+        return
+
+    records: list[dict] = []
+    total_policies: int | None = None
+
+    for _, row in best_df.iterrows():
+        pkl_path = Path(row["run_dir"]) / "eval_frozen_results.pkl"
+        if not pkl_path.exists():
+            pkl_path = Path(row["run_dir"]) / "eval_finetune_results.pkl"
+        if not pkl_path.exists():
+            continue
+        with open(pkl_path, "rb") as f:
+            affinity, env2policy, _ = pickle.load(f)
+        n_active = len(np.unique(env2policy))
+        records.append({
+            "repo_type": row["repo_type"],
+            "repo_display": row.get("repo_display", _get_display_name(row["repo_type"])),
+            "n_active_policies": n_active,
+        })
+        # Infer total policies from affinity shape: (P, E_eval)
+        if total_policies is None:
+            total_policies = affinity.shape[0]
+
+    if not records:
+        print("Warning: no eval assignment data — skipping active-policies plot.")
+        return
+
+    plot_df = pd.DataFrame(records)
+    # Sort by repo_type for consistent ordering
+    plot_df = plot_df.sort_values("repo_type").reset_index(drop=True)
+
+    N = len(plot_df)
+    colors = [_get_color_for_repo(rt) for rt in plot_df["repo_type"]]
+
+    metric_label = "Finetune" if "finetune" in metric else "Frozen"
+
+    with _figure_saver(
+        plots_dir, filename, figsize=(max(6, N * 0.9), 5), dpi=150
+    ) as (fig, ax):
+        x = np.arange(N)
+        bars = ax.bar(
+            x, plot_df["n_active_policies"],
+            color=colors, edgecolor="white", linewidth=0.8, width=0.55,
+        )
+
+        # Annotate each bar with the count
+        for i, (bar, count) in enumerate(zip(bars, plot_df["n_active_policies"])):
+            ax.annotate(
+                str(count),
+                (bar.get_x() + bar.get_width() / 2, bar.get_height()),
+                ha="center", va="bottom", fontsize=11, fontweight="bold",
+                xytext=(0, 4), textcoords="offset points",
+            )
+
+        # Horizontal line for total number of policies in the repository
+        if total_policies is not None:
+            ax.axhline(
+                total_policies, color="#555555", linestyle="--",
+                linewidth=1.2, alpha=0.7,
+                label=f"Total policies (P={total_policies})",
+            )
+            ax.legend(fontsize=8.5, loc="upper right", framealpha=0.9)
+
+        ax.set_xticks(x)
+        ax.set_xticklabels(
+            plot_df["repo_display"], rotation=25, ha="right", fontsize=10,
+        )
+        ax.set_ylabel("Number of Active Policies", fontsize=11)
+        ax.set_title(
+            f"Number of Active Policies During Evaluation",
+            fontsize=12, fontweight="bold",
+        )
+        ax.set_ylim(
+            0,
+            max(plot_df["n_active_policies"].max() + 1,
+                (total_policies or 0) + 1),
+        )
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+
+    print(f"Saved active-policies bar chart to {plots_dir / filename}")
+
 
 # Public orchestrator API
 def generate_comparison_plots(
@@ -676,17 +882,19 @@ def generate_comparison_plots(
     """Generate all cross-experiment comparison plots and a summary CSV.
 
     Produces:
-        - ``comparison_{repo_type}.png`` — per repo type, comparing its configs
+        - ``comparison_{repo_type}.svg`` — per repo type, comparing its configs
           (averaged across seeds).
-        - ``comparison_best_frozen.png`` — best config per repo type by frozen perf.
-        - ``comparison_best_finetune.png`` — best config per repo type by finetune perf.
-        - ``frozen_vs_finetune_scatter.png`` — all runs scatter.
-        - ``per_env_distributions.png`` — violin plot (all runs).
-        - ``eval_checkerboard_{repo_type}.png`` — assignment heatmaps.
-        - ``eval_checkerboard_best_frozen.png`` / ``_finetune.png`` — best-config
+        - ``comparison_best_frozen.svg`` — best config per repo type by frozen perf.
+        - ``comparison_best_finetune.svg`` — best config per repo type by finetune perf.
+        - ``frozen_vs_finetune_scatter.svg`` — all runs scatter.
+        - ``per_env_distributions.svg`` — violin plot (all runs).
+        - ``eval_checkerboard_{repo_type}.svg`` — assignment heatmaps.
+        - ``eval_checkerboard_best_frozen.svg`` / ``_finetune.svg`` — best-config
           assignment heatmaps for each criterion.
-        - ``adjusted_rand_heatmap_frozen.png`` / ``_finetune.png`` — ARI similarity
+        - ``adjusted_rand_heatmap_frozen.svg`` / ``_finetune.svg`` — ARI similarity
           between best configs for each criterion.
+        - ``active_policies_frozen.svg`` / ``_finetune.svg`` — number of active
+          (assigned) policies per repo type (random_matching excluded).
         - ``comparison_summary.csv`` — all metrics in one table.
     """
     plots_dir.mkdir(parents=True, exist_ok=True)
@@ -696,6 +904,13 @@ def generate_comparison_plots(
 
     has_ft = ("finetune_solve_rate_mean" in df.columns
               and df["finetune_solve_rate_mean"].notna().any())
+
+    # Reference lines for baseline / control repos.
+    # Drawn as horizontal dashed lines at the bar-top value.
+    _REFERENCE_REPOS: dict[str, str] = {
+        "generalist_matching": "Baseline (Generalist)",
+        "random_matching": "Control (Random)",
+    }
 
     # ── Best by frozen criterion ───────────────────────────────────────
     # Bar plots use all_seeds=True → cross-seed error bars are shown.
@@ -707,7 +922,8 @@ def generate_comparison_plots(
         plot_comparison_bars(
             best_frozen_bars, plots_dir,
             title="Best Configuration Per Repo Type (Frozen Criterion)",
-            filename="comparison_best_frozen.png",
+            filename="comparison_best_frozen.svg",
+            reference_repos=_REFERENCE_REPOS,
         )
     best_frozen_single = _select_best_config_per_repo(
         df, metric="frozen_solve_rate_mean"
@@ -716,11 +932,11 @@ def generate_comparison_plots(
         plot_eval_assignment_checkerboard(
             best_frozen_single, plots_dir,
             title="Best Config Per Repo Type (Frozen) — Eval Assignment",
-            filename="eval_checkerboard_best_frozen.png",
+            filename="eval_checkerboard_best_frozen.svg",
         )
         plot_adjusted_rand_score_heatmap(
             df, plots_dir, metric="frozen_solve_rate_mean",
-            filename="adjusted_rand_heatmap_frozen.png",
+            filename="adjusted_rand_heatmap_frozen.svg",
         )
 
     # ── Best by finetune criterion ─────────────────────────────────────
@@ -732,7 +948,16 @@ def generate_comparison_plots(
             plot_comparison_bars(
                 best_finetune_bars, plots_dir,
                 title="Best Configuration Per Repo Type (Finetune Criterion)",
-                filename="comparison_best_finetune.png",
+                filename="comparison_best_finetune.svg",
+                reference_repos=_REFERENCE_REPOS,
+            )
+            # Clean finetune-only version (no frozen bars)
+            plot_comparison_bars(
+                best_finetune_bars, plots_dir,
+                title="Performance of Starting Point Proposed by Repository (After Finetuning)",
+                filename="comparison_best_finetune_only.svg",
+                finetune_only=True,
+                reference_repos=_REFERENCE_REPOS,
             )
         best_finetune_single = _select_best_config_per_repo(
             df, metric="finetune_solve_rate_mean"
@@ -740,12 +965,12 @@ def generate_comparison_plots(
         if not best_finetune_single.empty:
             plot_eval_assignment_checkerboard(
                 best_finetune_single, plots_dir,
-                title="Best Config Per Repo Type (Finetune) — Eval Assignment",
-                filename="eval_checkerboard_best_finetune.png",
+                title="Best Config Per Repo Type (Finetune) - Eval Assignment",
+                filename="eval_checkerboard_best_finetune.svg",
             )
             plot_adjusted_rand_score_heatmap(
                 df, plots_dir, metric="finetune_solve_rate_mean",
-                filename="adjusted_rand_heatmap_finetune.png",
+                filename="adjusted_rand_heatmap_finetune.svg",
             )
 
     # ── All-runs scatter (every seed shown as one point) ───────────────
@@ -759,6 +984,13 @@ def generate_comparison_plots(
 
     # ── Per-repo checkerboards (all configs, all seeds shown) ─────────
     plot_per_repo_checkerboards(df, plots_dir)
+
+    # ── Active policies bar chart (random_matching excluded) ──────────
+    plot_active_policies_bar(df, plots_dir, metric="frozen_solve_rate_mean",
+                             filename="active_policies_frozen.svg")
+    if has_ft:
+        plot_active_policies_bar(df, plots_dir, metric="finetune_solve_rate_mean",
+                                 filename="active_policies_finetune.svg")
 
     # Summary CSV
     metric_cols = [
