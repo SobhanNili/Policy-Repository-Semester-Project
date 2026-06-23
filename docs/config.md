@@ -48,7 +48,7 @@ Located in [`configs/repo`](../configs/repo/).
     - `model_name`: The dino checkpoint path in huggingface. Make sure to have set `HF_TOKEN ` env variable if it is DINOv3 as it requires authentication.
     - 
 - `policy_latent_matching`: 
-    - `checkpoint_path`: Path to the trained checkpoint used for extraction of policy latent embeddings. To train such a checkpoint, use [this training script](../scripts/train_ppo.py) while using appropriate `train_levels`. For this experiment, `train_levels` was set to `train_all`.
+    - `checkpoint_path`: Path to the trained checkpoint used for extraction of policy latent embeddings. To train such a checkpoint, use [this training script](../scripts/train_ppo.py) while using appropriate `train_levels` IN [`configs/ppo_training/config.yaml`](../configs/ppo_training/config.yaml). For this experiment, `train_levels` was set to `train_all` there.
 
 - `morphology`: 
     - `feature_weights`: per-feature multipliers applied before distance. Feature ordering: `[polygons, circles, joints, thrusters, green_shapes, blue_shapes]`

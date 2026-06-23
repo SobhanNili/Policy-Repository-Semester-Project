@@ -15,7 +15,7 @@ BASE = [
     "--existing-pvc", "claimname=home,path=/home/niliahma",
 ]
 
-SEED = 0
+SEED = 67
 
 # ── Define every experiment as (job_name, python_command) ──────────────────
 EXPERIMENTS = [

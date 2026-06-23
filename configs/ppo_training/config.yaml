@@ -1,4 +1,3 @@
-# ── Hydra configuration ──────────────────────────────────────────────────────
 hydra:
   searchpath:
     # Compose kinetix config groups (env, model, learning, etc.) from the
@@ -8,18 +7,18 @@ hydra:
 
 # ── Kinetix defaults (composed from third-party config groups) ───────────────
 defaults:
-  - env: entity                # observation & action types, reward scale, frame_skip
-  - env_size: l                # max polygons / circles / joints / thrusters
+  - env: entity                
+  - env_size: l                
   - model:
-    - model-base               # fc_layer_depth, fc_layer_width, activation
-    - model-transformer        # transformer_depth, transformer_size, num_heads
-    - model-perm-invariant-mlp # symbolic_embedding_dim, encoder_size
+    - model-base               
+    - model-transformer        
+    - model-perm-invariant-mlp 
   - train_levels: train_all    # list of training levels, or random
-  - eval: s                    # held-out evaluation level set (small)
+  - eval: s                    # held-out evaluation level set 
   - learning:
-    - ppo-base                 # lr, gamma, clip_eps, gae_lambda, ent_coef, etc.
-    - ppo-rnn                  # num_steps (recurrent rollout length)
-  - misc: misc                 # save_path, video_frequency, wandb settings, etc.
+    - ppo-base                 
+    - ppo-rnn                  
+  - misc: misc                 
   - _self_
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -40,4 +39,4 @@ eval:
   eval_freq: 64
 
 learning:
-  total_timesteps: 1073741824 #1073741824
+  total_timesteps: 1073741824

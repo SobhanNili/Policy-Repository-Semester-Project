@@ -20,10 +20,10 @@ Usage:
 
 Output (saved to ``outputs/run_comparisons/`` by default):
     # FIXEME: need to Update this list once the actual plots are finalized, but for now expected outputs include:
-    comparison_{repo_type}.png          - per-repo-type bar charts comparing hyperparam configs within each repo
-    comparison_best.png                 - best config per repo type, side by side
-    frozen_vs_finetune_scatter.png      - scatter: frozen vs finetuned
-    per_env_distributions.png           - violin plot: per-env solve rates
+    comparison_{repo_type}.svg          - per-repo-type bar charts comparing hyperparam configs within each repo
+    comparison_best.svg                 - best config per repo type, side by side
+    frozen_vs_finetune_scatter.svg      - scatter: frozen vs finetuned
+    per_env_distributions.svg           - violin plot: per-env solve rates
     comparison_summary.csv              - all metrics in one table
 """
 
