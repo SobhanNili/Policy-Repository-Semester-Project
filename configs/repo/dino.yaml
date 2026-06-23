@@ -1,14 +1,5 @@
-# DinoMatchingRepo — assigns policies based on DINOv3 visual embedding similarity.
-# Uses a frozen DINOv3 ViT-B/16 model to encode rendered environment images into
-# 768-dim L2-normalized embeddings, then computes RBF-kernel affinity with
-# soft-weighted success history (same architecture as MorphologyMatchingRepo).
 repo_type: dino_matching
 
 model_name: "facebook/dinov3-vitb16-pretrain-lvd1689m"
-                              # HuggingFace DINO model ID (~330 MB, cached after first download)
-                              #   768-dimensional CLS embeddings
-history_decay: 0.1            # exponential decay rate for past-step weighting
-                              #   0 = all history weighted equally forever
-                              #   1 = very fast forgetting
-sigma: 0.8                    # RBF kernel bandwidth on L2 distance between L2-normalized embeddings
-                              #   embedding L2 range is [0, 2]; 0.3 gives good discrimination
+history_decay: 0.1            
+sigma: 0.8                    

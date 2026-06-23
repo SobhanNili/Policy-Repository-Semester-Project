@@ -1,6 +1,3 @@
-# NetworkEmbeddingMatchingRepo — affinity from Kinetix transformer backbone embeddings.
-# Uses a frozen checkpoint to encode entity observations into L2-normalized embeddings,
-# then RBF-kernel affinity with soft-weighted success history.
 repo_type: policy_latent_matching
 
 checkpoint_path: "checkpoints/ppo_training/Kinetix-SymbolicEntity-MultiDiscrete-PPO-1B-2048-301624468-1B/full_model.pbz2"
