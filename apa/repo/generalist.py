@@ -4,7 +4,8 @@ from apa.repo.base import get_pytree_batch_size
 import jax
 
 class GeneralistMatchingRepo(PolicyRepo):
-    """A baseline matching where all envs are assigned to a single, fixed policy over all steps. This is a degenerate case of the matching problem, but it is useful for testing and debugging."""
+    """A baseline matching where all [observed] envs are assigned to a single, fixed policy over all steps. 
+    Serves as baseline for generalist training, where a single policy is trained to solve all environments."""
     
     def __init__(self, config, train_env_reset_states, rng) -> None:
         super().__init__(config, train_env_reset_states, rng)

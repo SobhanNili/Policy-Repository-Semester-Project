@@ -29,6 +29,15 @@ class EmbeddingMatchingRepo(PolicyRepo, ABC):
         history_decay: float = 0.1,
         sigma: float = 0.3,
     ) -> None:
+        """Args:
+            config: Configuration dictionary.
+            train_env_reset_states: Training level states, shape ``(E, ...)``.
+            rng: JAX random key.
+            history_decay: Exponential decay rate for past-step weighting.
+                ``0`` = all history equally weighted forever (no forgetting / putting more emphasis on recent history)
+                ``1`` = very fast forgetting.
+            sigma: RBF kernel bandwidth on L2 distance between embeddings.
+        """
         super().__init__(config, train_env_reset_states, rng)
 
         self.history_decay = history_decay

@@ -7,8 +7,7 @@ import jax
 class RandomMatchingRepo(PolicyRepo):
     """Random affinity: every candidate env is equally likely for every policy.
 
-    Uniform affinity + categorical sampling in the base class produces truly
-    random assignment — no override of ``derive_assignment_mask`` needed.
+    Uniform affinity is compatible with random tiebreaking in the base class, ensuring random policy <-> env matching.
     """
 
     def __init__(self, config, train_env_reset_states, rng) -> None:

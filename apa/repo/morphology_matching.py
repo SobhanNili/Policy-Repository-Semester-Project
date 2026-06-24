@@ -1,15 +1,11 @@
-"""Repository that assigns policies to environments based on component-count similarity.
-
-Uses morphological feature vectors (6 selected components from
-``count_active_components``) as embeddings.  The RBF-kernel +
-soft-weighted history scoring is inherited from ``EmbeddingMatchingRepo``.
+"""
+Repository that assigns policies to environments based on component-count similarity.
 """
 
 from apa.repo.embedding_matching import EmbeddingMatchingRepo
 from apa.utils.env import count_active_components
 import jax.numpy as jnp
 import jax
-
 
 class MorphologyMatchingRepo(EmbeddingMatchingRepo):
     """Matches policies to structurally similar environments.
@@ -35,22 +31,20 @@ class MorphologyMatchingRepo(EmbeddingMatchingRepo):
             train_env_reset_states: Training level states, shape ``(E, ...)``.
             rng: JAX random key.
             history_decay: Exponential decay rate for past-step weighting.
-                ``0`` = all history equally weighted forever;
+                ``0`` = all history equally weighted forever (no forgetting / putting more emphasis on recent history)
                 ``1`` = very fast forgetting.
-            sigma: RBF kernel bandwidth in weighted normalised L2 space.
-                Smaller values require closer component-count match.
-                Default ``0.15`` (suitable when envs differ by 1−2 components).
+            sigma: RBF kernel bandwidth on L2 distance between embeddings.
             feature_weights: Per-feature multipliers applied before distance
                 computation.  Length-6 tuple for ``[polygons, circles, joints,
                 thrusters, green_shapes, blue_shapes]``.
         """
-        # ── Feature configuration (needed by _encode_envs, called by super().__init__)
         # Indices into the 9-dim count_active_components output:
         #   0: n_polygons   1: n_circles   2: n_joints   3: n_thrusters
         #   6: n_green_shapes   7: n_blue_shapes
+        # FIXME: I should`ve` probably include more fetures such as red objects count.
         self._feature_indices = jnp.array([0, 1, 2, 3, 6, 7], dtype=jnp.int32)
 
-        # Max capacities from the env_size config (merged into flat config by load_config).
+        # Max capacities for each type of entity (determined from the env_size config)
         num_poly = float(config["num_polygons"])
         num_circ = float(config["num_circles"])
         num_joint = float(config["num_joints"])
@@ -67,17 +61,15 @@ class MorphologyMatchingRepo(EmbeddingMatchingRepo):
         super().__init__(config, train_env_reset_states, rng,
                          history_decay=history_decay, sigma=sigma)
 
-    # ── Embedding (implements EmbeddingMatchingRepo._encode_envs) ──────────
-
     def _encode_envs(self, env_reset_states) -> jnp.ndarray:
         """Extract normalised, weighted component-count vectors.
 
         Returns ``(N, 6)`` float array with features in [0, 1] after
-        normalisation by max capacities, multiplied by per-feature weights.
+        normalisation by max capacities per that row, multiplied by per-feature weights.
         """
         raw = jax.vmap(count_active_components)(
             env_reset_states.env_state
         )  # (N, 9)
-        selected = raw[:, self._feature_indices].astype(jnp.float32)  # (N, 6)
+        selected = raw[:, self._feature_indices].astype(jnp.float32) # (N, 6)
         normalised = selected / self._max_vals                       # (N, 6) in [0, 1]
         return normalised * self._feature_weights                    # (N, 6) weighted
