@@ -24,12 +24,16 @@ The following need to be installed after `uv sync` based on the available cuda v
 - Torch: `uv pip install torch torchvision --index-url https://download.pytorch.org/whl/cu126`
 
 > [!NOTE]
-> For running the DINO expierment, if using [DINOv3](https://huggingface.co/docs/transformers/en/model_doc/dinov3) you need to first request for getting access on huggningface website, and export your personal `HF_TOKEN` in terminal running the scripts. 
+> For running the DINO experiment, if using [DINOv3](https://huggingface.co/docs/transformers/en/model_doc/dinov3) you need to first request for getting access on huggningface website, and export your personal `HF_TOKEN` in terminal running the scripts. 
+
+> [!NOTE]
+> For running the policy latent experiment, first train a checkpoint 
 
 # Scripts
 - `scripts/run.py`: Run the policy repository training and plot results for a single configuration. Run `python scripts/run.py -h` for details and possible kwarg overrides. The configuration is detailed in [here](docs/config.md).
 - `scripts/plot_results.py`: Re-generate the plots for a specific experiment. Run `python scripts/plot_results.py -h` for details.
 - `scripts/compare_runs.py`: Generate stats and plot for comparing different repository logics / hyperparameters. Run `python scripts/compare_runs.py -h` for details.
+- `scripts/train_ppo.py`: based on the `third_party/kinetix/experiments/ppo.py` to train a policy on training environments in parallel, producing a checkpoint to be used in policy-latent similarity scoring function.
 - `scripts/runai_sweep.py`: Submit a batch of parallel jobs to EPFL RCP. Expects the code to be at user home directory on cluster.
 
 # Analytics
@@ -37,6 +41,7 @@ The following need to be installed after `uv sync` based on the available cuda v
 
 # Reproduction
 First put the desired config values in [configs/config.yaml](configs/config.yaml) and corresponding repository configs. Consult the [config readme](docs/config.md) for overview of the params. For repoducing the results from the slides, use the config file in its current state in the repo with across 4 random seeds (0, 2, 90, 42).
+Run the `scripts/train_ppo.py` after adjusting destired training envrionments on its [corresponding config](./configs/ppo_training/config.yaml), to get a policy checkpoint to use policy latent metching repo.  
 
 Then use `scripts/run.py` (possibly with kwarg overrides) or run a hyperparam sweep using `scripts/sweep.sh`. By default, output will be stored at `outputs/experiments`.
 After that for generating the comparison plots across different repository logics, run `scripts/compare_runs` which generates outputs at `outputs/run_comparisons`.
