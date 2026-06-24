@@ -1,9 +1,9 @@
-"""Analysis and plotting utilities for policy repository experiments.
+"""Analysis and plotting utilities for policy repository experiments, based on cached results.
 
 Submodules
 ----------
 common           common utils of plotting.
-plot_runs        Diagnostic plots for a single experiment run (from step logs).
+plot_runs        Diagnostic plots for a single experiment run.
 plot_comparison  Cross-experiment comparison plots and data collection.
 """
 

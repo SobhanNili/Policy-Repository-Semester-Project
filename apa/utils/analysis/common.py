@@ -57,11 +57,11 @@ def _parse_repo_type_from_name(dirname: str) -> str | None:
 
 # Hyperparameter discovery
 def _get_varying_hyperparam_cols(df: pd.DataFrame) -> list[str]:
-    """Return columns that represent varying hyperparameters.
+    """Return columns that represent varying hyperparameters for a certain repotype.
 
     Excludes identity columns (run_dir, repo_type, repo_display) and
     metric columns (frozen_*, finetune_*).  Returns only columns with
-    more than one unique non-NaN value — constant columns provide no
+    more than one unique non-NaN value, as constant columns provide no
     grouping or labelling signal.
     """
     varying: list[str] = []
@@ -173,10 +173,10 @@ def _plot_boxplot_over_time(
     reference_line: float | None = None,
     reference_label: str | None = None,
 ) -> None:
-    """Box plot with one box per step, plus mean overlay and optional reference line.
+    """Box plot with one box per repo training step, plus mean overlay and optional reference line.
 
-    Each box summarises the distribution of *values* across the E_subset
-    candidate environments for that step.
+    Each box summarises the distribution of `values` across the E_subset
+    candidate environments for that step.)
 
     Args:
         values: (T, E_subset) array.
@@ -208,7 +208,7 @@ def _plot_boxplot_over_time(
                         "markeredgewidth": 0},
         )
 
-        # Mean overlay — compute only for steps that have at least one valid
+        # Mean overlay: computed only for steps that have at least one valid
         # value, avoiding "Mean of empty slice" warnings on all-NaN rows
         # (which occur when diagnostics are logged only periodically).
         mean_vals = np.full(T, np.nan)

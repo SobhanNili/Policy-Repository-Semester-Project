@@ -1,8 +1,6 @@
-"""Diagnostic plots for a single experiment run.
-
-Produces all single-experiment plots from saved ``step_logs.pkl`` data.
-Orchestrated by ``generate_plots``. Also provides ``save_env_observations``
-for rendering environment thumbnail images.
+"""
+Diagnostic plots for a single experiment run.
+Produces all single-experiment plots from cached experiment results.
 """
 
 from __future__ import annotations
@@ -65,14 +63,14 @@ def _unpack_step_logs(step_logs: list) -> _StepLogData:
     # ── Raw arrays ──────────────────────────────────────────────────────
     _s = lambda field: np.stack([np.array(getattr(log, field)) for log in step_logs])
 
-    affinities = _s("affinity_scores")       # (T, P, E_subset)
-    active_masks = _s("active_mask")          # (T, E_subset, P)
+    affinities = _s("affinity_scores")        # (T, P, E_subset)
+    active_masks = _s("active_mask")          # (T, E_subset, P) assignment mask
     solve_rates = _s("solve_rate")            # (T, P, E_subset)  post-training
     avg_returns = _s("avg_return")            # (T, P, E_subset)  post-training
     pre_frozen_solve_rates = _s("pre_frozen_solve_rate")     # (T, P, E_subset)
     pre_finetune_solve_rates = _s("pre_finetune_solve_rate") # (T, P, E_subset)
     candidate_env_indices = _s("candidate_env_indices")      # (T, E_subset)
-
+    
     # ── Derived metrics ─────────────────────────────────────────────────
     mean_solve_rate, mean_avg_return, n_active_envs = _compute_per_policy_active_metrics(
         active_masks, solve_rates, avg_returns, T, P
@@ -81,7 +79,7 @@ def _unpack_step_logs(step_logs: list) -> _StepLogData:
     cv_per_env = _compute_cv_per_env(affinities)
     score_margin_per_env = _compute_score_margin_per_env(affinities)
 
-    # Per-environment Spearman ρ (affinity vs solve rate, within each column)
+    # Per-environment Spearman ρ (affinity and solve rate corr, per each environment)
     spearman_pre_frozen = _compute_per_env_spearman(
         affinities, pre_frozen_solve_rates, T, P, E_subset
     )
@@ -92,7 +90,7 @@ def _unpack_step_logs(step_logs: list) -> _StepLogData:
         affinities, solve_rates, T, P, E_subset
     )
 
-    # Greedy-assignment matrix
+    # Greedy-assignment matrix (not nessecariy matching the assignment mask, which has safety nets / sometimes exploration)
     num_envs = int(candidate_env_indices.max()) + 1
     assignment = _compute_assignment_matrix(affinities, candidate_env_indices,
                                             num_envs, T, E_subset)
@@ -113,7 +111,6 @@ def _unpack_step_logs(step_logs: list) -> _StepLogData:
 
 
 # ── Derived-metric helpers ───────────────────────────────────────────────────
-
 def _compute_per_policy_active_metrics(active_masks, solve_rates, avg_returns,
                                         T, P):
     """Per-policy mean solve rate & avg return over *active* envs only."""
@@ -170,7 +167,7 @@ def _compute_score_margin_per_env(affinities):
 
 def _compute_assignment_matrix(affinities, candidate_env_indices,
                                 num_envs, T, E_subset):
-    """Greedy-assignment matrix (num_envs, T): policy index or -1 (tied) or NaN."""
+    """Greedy-assignment matrix (num_envs, T): policy index or -1 (when policies are tied) or NaN if env was not in the candidate set for that step."""
     assignment = np.full((num_envs, T), np.nan)
     for t in range(T):
         for local_i in range(E_subset):
@@ -185,8 +182,8 @@ def _compute_per_env_spearman(affinities, solve_rates, T, P, E_subset):
     """Per-environment Spearman ρ between affinity and solve rate.
 
     For each (t, e), computes ρ = Spearman(affinity[:, e], solve_rate[:, e])
-    across the P policies.  This avoids cross-environment scale artifacts that
-    plague a single pooled correlation across all envs.
+    across the P policies.  This avoids cross-environment score scale incomparability that
+    can plague a single pooled correlation across all envs.
     """
     rho = np.full((T, E_subset), np.nan)
     for t in range(T):
@@ -200,11 +197,7 @@ def _compute_per_env_spearman(affinities, solve_rates, T, P, E_subset):
                 rho[t, e], _ = spearmanr(aff_col[valid], sr_col[valid])
     return rho
 
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# Plot functions
-# ═══════════════════════════════════════════════════════════════════════════════
-
+# ── Plotting Functions ───────────────────────────────────────────────────
 def _plot_performance(data: _StepLogData, plots_dir: Path, colors):
     """Per-policy mean solve rate and avg return over steps."""
     T, P = data.T, data.P
@@ -234,9 +227,8 @@ def _plot_performance(data: _StepLogData, plots_dir: Path, colors):
                 bbox_inches="tight")
     plt.close(fig)
 
-
 def _plot_active_envs(data: _StepLogData, plots_dir: Path, colors):
-    """Stackplot of active environment counts per policy (post-mask)."""
+    """Stackplot of active environment counts per policy."""
     with _figure_saver(plots_dir, "assigned_envs.svg", figsize=(10, 4)) as (fig, ax):
         ax.stackplot(np.arange(data.T), data.n_active_envs.T,
                      labels=[f"Policy {p}" for p in range(data.P)],
@@ -249,11 +241,8 @@ def _plot_active_envs(data: _StepLogData, plots_dir: Path, colors):
 
 
 def _plot_env_greedy_policy_choice(data: _StepLogData, plots_dir: Path, colors):
-    """Stackplot of raw argmax env counts per policy (before safety nets).
-
-    Contrast with ``_plot_active_envs``: if this plot shows one policy
-    hoarding all envs while the active-envs plot is balanced, the safety
-    net is doing heavy lifting.
+    """Stackplot of raw argmax env counts per policy. 
+    (before safety nets, so showing greedy assignments rather than the actual assignment mask)
     """
     steps = np.arange(1, data.T)
     with _figure_saver(plots_dir, "env_greedy_policy_choices.svg",
@@ -271,36 +260,34 @@ def _plot_env_greedy_policy_choice(data: _StepLogData, plots_dir: Path, colors):
 
 
 def _plot_affinity_score_spread_cv(data: _StepLogData, plots_dir: Path):
-    """Box plot of per-environment CV (σ/μ) at each repo step."""
+    """Box plot of per-environment affinity score CV (σ/μ) at each repo step."""
     _plot_boxplot_over_time(
         data.cv_per_env, plots_dir, "score_spread_cv.svg",
-        title="Affinity Score Spread — Coefficient of Variation Over Training",
+        title="Affinity Score Spread - Coefficient of Variation Over Training",
         ylabel=r"CV ($\sigma$ / $\mu$) per Environment",
         ylim=(data.cv_per_env.min() - 0.1, data.cv_per_env.max() + 0.1),
         facecolor="lightblue", overlay_label="Mean CV",
     )
 
-
 def _plot_affinity_score_spread_margin(data: _StepLogData, plots_dir: Path):
-    """Box plot of per-environment Normalized Margin at each repo step.
+    """Box plot of per-environment Normalized Margin of affinity scores at each repo step.
 
     0 = all policies score equally (contested).
     1 = one policy clearly dominates (confident assignment).
     """
     _plot_boxplot_over_time(
         data.score_margin_per_env, plots_dir, "score_spread_margin.svg",
-        title="Affinity Score Spread — Normalized Top-2 Margin",
+        title="Affinity Score Spread - Normalized Top-2 Margin",
         ylabel="Normalized Margin per Environment",
         ylim=(-0.05, 1.05),
         facecolor="lightgreen", overlay_label="Mean Normalized Margin",
     )
 
-
 def _plot_assignment_heatmap(data: _StepLogData, plots_dir: Path, colors):
     """Env x step heatmap of greedy argmax assignments.
 
     Rows = envs (0 … E-1); Columns = repo steps.
-    Grey = contested; White = not sampled.
+    Grey = contested across policies; White = not sampled.
     """
     num_envs, T, P = data.num_envs, data.T, data.P
     contested_color = "#bdbdbd"
@@ -347,11 +334,6 @@ def _plot_per_env_spearman(data: _StepLogData, plots_dir: Path,
         facecolor="lightblue", overlay_label=r"Mean $\rho$",
         reference_line=0, reference_label=r"$\rho = 0$",
     )
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# Per-step policy–environment assignment grids
-# ═══════════════════════════════════════════════════════════════════════════════
 
 def generate_env_assignment_grids(
     step_logs: list,
@@ -499,10 +481,6 @@ def generate_env_assignment_grids(
     print(f"Saved {len(steps_to_plot)} assignment grid images to {grids_dir}")
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# Evaluation assignment bar plot
-# ═══════════════════════════════════════════════════════════════════════════════
-
 def plot_eval_assignment_bars(
     env2policy: np.ndarray,
     num_policies: int,
@@ -604,10 +582,6 @@ def _group_eval_env_images_by_policy(run_dir: Path) -> None:
           f"subfolders under {by_policy_dir}")
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# Environment observation visualization
-# ═══════════════════════════════════════════════════════════════════════════════
-
 def save_env_observations(env_params, static_env_params,
                            env_reset_states, output_dir: Path,
                            folder: str = "env_train_observations") -> None:
@@ -637,10 +611,7 @@ def save_env_observations(env_params, static_env_params,
     print(f"Saved {pixels_np.shape[0]} environment observation images to {out_dir}")
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# Public orchestrator
-# ═══════════════════════════════════════════════════════════════════════════════
-
+# Public API for generating all plots and analysis
 def generate_plots(step_logs: list, output_dir: Path) -> None:
     """Generate all diagnostic plots from step_logs, saved to output_dir/plots/.
 
@@ -654,7 +625,7 @@ def generate_plots(step_logs: list, output_dir: Path) -> None:
         - Evaluation Assignment Distribution bar plot
     """
     if not step_logs:
-        print("Warning: empty step_logs — nothing to plot.")
+        print("Warning: empty step_logs - nothing to plot.")
         return
 
     plots_dir = output_dir / "plots"

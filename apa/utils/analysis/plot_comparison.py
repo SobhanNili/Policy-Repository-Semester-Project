@@ -1,4 +1,5 @@
-"""Cross-experiment comparison plots and data collection.
+"""
+Cross-experiment comparison plots and data collection.
 
 Scans experiment output directories, aggregates metrics, and produces
 comparison plots across different repo types and hyperparams, and also a summary CSV.
@@ -133,7 +134,7 @@ def _select_best_config_per_repo(
        averages all metrics across seeds within each group.
     2. Picks the group with the highest mean *metric* per repo type.
     3. Finds the smallest seed common to **all** repo types (so evaluation
-       environments are comparable across repos).
+       environments are comparable across repos, as eval splitting is dependent on this seed).
     4. Returns either:
        - The single original DataFrame row for the common seed
          (*all_seeds* = False, default; for checkerboards / ARI — one column
@@ -148,7 +149,7 @@ def _select_best_config_per_repo(
     if df.empty:
         return pd.DataFrame()
 
-    # ── Determine grouping columns (hyperparams only, not seed) ────────
+    # Determine grouping columns (hyperparams only, not seed)
     # seed is excluded from varying cols because it's in _IDENTITY_COLS.
     varying = _get_varying_hyperparam_cols(df)
     group_cols = ["repo_type"] + [c for c in varying if c in df.columns]
@@ -168,7 +169,7 @@ def _select_best_config_per_repo(
             best_rows.append(group.loc[idx].to_dict())
         return pd.DataFrame(best_rows)
 
-    # ── Aggregate metrics across seeds within each config ──────────────
+    # Aggregate metrics across seeds within each config
     metric_patterns = ("frozen_", "finetune_")
     metric_cols = [c for c in df.columns if c.startswith(metric_patterns)]
 
@@ -179,7 +180,7 @@ def _select_best_config_per_repo(
 
     grouped = df.groupby(group_cols, dropna=False).agg(agg_dict).reset_index()
 
-    # ── Find smallest seed common to ALL repo types ────────────────────
+    # Find smallest seed common to ALL repo types
     seeds_by_repo: dict[str, set] = {}
     for rt in df["repo_type"].unique():
         seeds_by_repo[rt] = set(
@@ -191,7 +192,7 @@ def _select_best_config_per_repo(
     else:
         common_seed = None
 
-    # ── Pick the best config per repo type ─────────────────────────────
+    # Pick the best config per repo type based on the requested metric
     best_rows: list[dict] = []
     for repo_type, group in grouped.groupby("repo_type", dropna=False):
         if metric in group.columns and group[metric].notna().any():
@@ -203,7 +204,7 @@ def _select_best_config_per_repo(
         best = group.loc[idx].to_dict()
 
         # Choose representative seed for this config (used only when
-        # all_seeds=False — for checkerboards / ARI).
+        # all_seeds=False - for checkerboards / ARI).
         available = best.get("seed", [])
         if common_seed is not None and common_seed in available:
             chosen = common_seed
@@ -382,7 +383,7 @@ def plot_comparison_bars(
                                    sharex=True)
 
     if finetune_only:
-        # ── Finetune-only mode: single bar per group ──────────────────
+        # Finetune-only mode: single bar per group rather than frozen + finetuned side by side
         bar_width = 0.5
 
         def _draw_bars(ax, agg, metric_label: str):
@@ -405,7 +406,7 @@ def plot_comparison_bars(
             return _draw_reference_lines(ax, agg, "finetune_mean")
 
     else:
-        # ── Normal mode: frozen + finetuned side by side ─────────────
+        # frozen + finetuned side by side
         width = 0.35
 
         def _draw_bars(ax, agg, metric_label: str):
@@ -467,7 +468,7 @@ def plot_comparison_bars(
                 seen.add(lbl)
                 unique_ref.append(h)
 
-    # ── Single figure legend (frozen/finetuned + reference lines) ─────
+    # Single figure legend (frozen/finetuned + reference lines)
     fig_handles: list = []
     if not finetune_only:
         fig_handles.extend([
@@ -516,8 +517,8 @@ def plot_frozen_vs_finetune_scatter(
 ) -> None:
     """Scatter of frozen vs finetuned metric, one point per run.
 
-    Points above the diagonal = fine-tuning helps.
-    Color = repo type; marker size ∝ frozen std (larger = more variable).
+    Points above the diagonal means that fine-tuning helps with performance rather than making the policy collapse.
+    Color = repo type; marker size ∝ frozen std across eval envs (larger = more variable).
     """
     frozen_col = f"frozen_{metric}_mean"
     ft_col = f"finetune_{metric}_mean"
@@ -549,9 +550,9 @@ def plot_frozen_vs_finetune_scatter(
 
 # Per-environment distribution plot
 def plot_per_env_distributions(df: pd.DataFrame, plots_dir: Path) -> None:
-    """Violin plot of per-environment solve rates, one violin per run.
-
-    Wide violins with high median = consistent; narrow with long tails = fragile.
+    """
+    Violin plot of per-environment solve rates, one violin per run.
+    Providing the distribution of eval environment solve rates for each repo.
     """
     records: list[dict] = []
     varying_cols = _get_varying_hyperparam_cols(df)
@@ -715,6 +716,7 @@ def plot_adjusted_rand_score_heatmap(
 ) -> None:
     """Heatmap of pairwise Adjusted Rand Index between eval assignments
     of the best configuration per repo type.
+    Shows how similar the environment groupings are across repos, signaling difference in rationlle of assignments.
 
     Args:
         df: DataFrame from ``collect_experiment_results``.
@@ -724,8 +726,7 @@ def plot_adjusted_rand_score_heatmap(
         filename: output filename.
     """
     best_df = _select_best_config_per_repo(df, metric=metric)
-    # Exclude random and generalist — their assignments carry no meaningful
-    # signal for similarity analysis.
+    # Exclude random and generalist as their assigingmnets are forced.
     best_df = best_df[~best_df["repo_type"].isin(
         ["random_matching", "generalist_matching"]
     )]
@@ -776,7 +777,7 @@ def plot_active_policies_bar(
     dominate) or balanced specialization.
 
     The ``random_matching`` repo is excluded because its assignments are
-    inherently random and carry no meaningful signal.
+    inherently random and carry no meaningful signal. Generalist is forced to have one active policy at a time.
 
     Args:
         df: DataFrame from ``collect_experiment_results``.
@@ -882,20 +883,20 @@ def generate_comparison_plots(
     """Generate all cross-experiment comparison plots and a summary CSV.
 
     Produces:
-        - ``comparison_{repo_type}.svg`` — per repo type, comparing its configs
-          (averaged across seeds).
-        - ``comparison_best_frozen.svg`` — best config per repo type by frozen perf.
-        - ``comparison_best_finetune.svg`` — best config per repo type by finetune perf.
-        - ``frozen_vs_finetune_scatter.svg`` — all runs scatter.
-        - ``per_env_distributions.svg`` — violin plot (all runs).
-        - ``eval_checkerboard_{repo_type}.svg`` — assignment heatmaps.
-        - ``eval_checkerboard_best_frozen.svg`` / ``_finetune.svg`` — best-config
+        - ``comparison_{repo_type}.svg`` - solve rate / return averaged across eval envrionments per repo type, comparing its hyperparams.
+          (also averaged across seeds when there are multiple seeds per identical hyperparams).
+        - ``comparison_best_frozen.svg`` - solve rate / return averaged across eval envrionments for best config per repo type based on frozen solve rate.
+        - ``comparison_best_finetune.svg`` - solve rate / return averaged across eval envrionments for best config per repo type based on finetuned solve rate.
+        - ``frozen_vs_finetune_scatter.svg`` - all runs scatter for frozen vs. finetune solve rate scores.
+        - ``per_env_distributions.svg`` - violin plot (all runs) for showing the distribution of solve rates across eval environments for a certain repo.
+        - ``eval_checkerboard_{repo_type}.svg`` - assignment heatmaps of eval envs to repos for comparing assigment logic across different repo types.
+        - ``eval_checkerboard_best_frozen.svg`` / ``_finetune.svg`` - best-config
           assignment heatmaps for each criterion.
-        - ``adjusted_rand_heatmap_frozen.svg`` / ``_finetune.svg`` — ARI similarity
-          between best configs for each criterion.
-        - ``active_policies_frozen.svg`` / ``_finetune.svg`` — number of active
+        - ``adjusted_rand_heatmap_frozen.svg`` / ``_finetune.svg`` - ARI similarity
+          between best configs for each criterion (frozen or finetuned solve rate).
+        - ``active_policies_frozen.svg`` / ``_finetune.svg`` - number of active
           (assigned) policies per repo type (random_matching excluded).
-        - ``comparison_summary.csv`` — all metrics in one table.
+        - ``comparison_summary.csv`` - all metrics in one table.
     """
     plots_dir.mkdir(parents=True, exist_ok=True)
 
@@ -905,16 +906,13 @@ def generate_comparison_plots(
     has_ft = ("finetune_solve_rate_mean" in df.columns
               and df["finetune_solve_rate_mean"].notna().any())
 
-    # Reference lines for baseline / control repos.
+    # Reference lines for baseline / control on perforamnce comparison bar plots.
     # Drawn as horizontal dashed lines at the bar-top value.
     _REFERENCE_REPOS: dict[str, str] = {
         "generalist_matching": "Baseline (Generalist)",
         "random_matching": "Control (Random)",
     }
 
-    # ── Best by frozen criterion ───────────────────────────────────────
-    # Bar plots use all_seeds=True → cross-seed error bars are shown.
-    # Checkerboard & ARI use default all_seeds=False → one column per repo.
     best_frozen_bars = _select_best_config_per_repo(
         df, metric="frozen_solve_rate_mean", all_seeds=True
     )
@@ -939,7 +937,6 @@ def generate_comparison_plots(
             filename="adjusted_rand_heatmap_frozen.svg",
         )
 
-    # ── Best by finetune criterion ─────────────────────────────────────
     if has_ft:
         best_finetune_bars = _select_best_config_per_repo(
             df, metric="finetune_solve_rate_mean", all_seeds=True
@@ -951,7 +948,7 @@ def generate_comparison_plots(
                 filename="comparison_best_finetune.svg",
                 reference_repos=_REFERENCE_REPOS,
             )
-            # Clean finetune-only version (no frozen bars)
+
             plot_comparison_bars(
                 best_finetune_bars, plots_dir,
                 title="Performance of Starting Point Proposed by Repository (After Finetuning)",
@@ -973,19 +970,15 @@ def generate_comparison_plots(
                 filename="adjusted_rand_heatmap_finetune.svg",
             )
 
-    # ── All-runs scatter (every seed shown as one point) ───────────────
     if has_ft:
         plot_frozen_vs_finetune_scatter(df, plots_dir, metric="solve_rate")
         plot_frozen_vs_finetune_scatter(df, plots_dir, metric="avg_return")
 
-    # ── Per-environment distributions ─────────────────────────────────
     if outputs_root is not None:
         plot_per_env_distributions(df, plots_dir)
 
-    # ── Per-repo checkerboards (all configs, all seeds shown) ─────────
     plot_per_repo_checkerboards(df, plots_dir)
 
-    # ── Active policies bar chart (random_matching excluded) ──────────
     plot_active_policies_bar(df, plots_dir, metric="frozen_solve_rate_mean",
                              filename="active_policies_frozen.svg")
     if has_ft:
